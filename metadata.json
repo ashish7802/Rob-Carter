@@ -1,0 +1,12 @@
+{
+  "name": "Incognito: Anonymous Chat & Call",
+  "description": "Anonymous real-time chat, voice call, video call, screen share, and interactive whiteboard with zero tracking and privacy voice/video filters.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
