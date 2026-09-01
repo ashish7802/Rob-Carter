@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AnonymousUser, PeerState, ChatMessage } from '../types';
+import { AnonymousUser, PeerState, ChatMessage, E2EESecurityDetails } from '../types';
 import { getRoomInviteUrl, copyToClipboard } from '../utils/invite';
 import { ChatPanel } from './ChatPanel';
+import { E2EEVerificationModal } from './E2EEVerificationModal';
 import {
   Mic,
   MicOff,
@@ -20,9 +21,6 @@ import {
   Lock,
   Pin,
   PinOff,
-  Maximize2,
-  Minimize2,
-  Share2,
 } from 'lucide-react';
 
 interface CallViewProps {
@@ -33,9 +31,11 @@ interface CallViewProps {
   isAudioEnabled: boolean;
   isVideoEnabled: boolean;
   isScreenSharing: boolean;
+  isDataChannelOpen: boolean;
   audioLevel: number;
   roomCode: string;
   messages: ChatMessage[];
+  e2eeDetails: E2EESecurityDetails | null;
   onToggleAudio: () => void;
   onToggleVideo: () => void;
   onToggleScreenShare: () => void;
@@ -53,9 +53,11 @@ export const CallView: React.FC<CallViewProps> = ({
   isAudioEnabled,
   isVideoEnabled,
   isScreenSharing,
+  isDataChannelOpen,
   audioLevel,
   roomCode,
   messages,
+  e2eeDetails,
   onToggleAudio,
   onToggleVideo,
   onToggleScreenShare,
@@ -70,6 +72,7 @@ export const CallView: React.FC<CallViewProps> = ({
   const [pinnedTile, setPinnedTile] = useState<'local' | 'remote' | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
+  const [isE2EEModalOpen, setIsE2EEModalOpen] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -132,6 +135,7 @@ export const CallView: React.FC<CallViewProps> = ({
               {roomCode}
             </span>
             <button
+              id="call-copy-code-btn"
               onClick={handleCopyLink}
               title="Copy meeting invite link"
               className="text-[#9aa0a6] hover:text-white transition-colors cursor-pointer"
@@ -146,11 +150,19 @@ export const CallView: React.FC<CallViewProps> = ({
           </div>
         </div>
 
-        {/* E2EE Badge */}
-        <div className="hidden sm:flex items-center gap-1.5 rounded-full bg-[#202124]/90 backdrop-blur-md px-3 py-1.5 border border-emerald-500/30 text-[11px] text-emerald-400 pointer-events-auto">
-          <Lock className="h-3 w-3" />
-          <span>End-to-End Encrypted (P2P)</span>
-        </div>
+        {/* E2EE Badge (Clickable for Verification Modal) */}
+        <button
+          id="call-verify-e2ee-btn"
+          onClick={() => setIsE2EEModalOpen(true)}
+          className="flex items-center gap-1.5 rounded-full bg-[#202124]/90 hover:bg-[#282a2d] transition-all backdrop-blur-md px-3.5 py-1.5 border border-emerald-500/40 text-[11px] text-emerald-400 pointer-events-auto cursor-pointer shadow-sm group"
+          title="Click to view End-to-End Encryption Security Verification"
+        >
+          <Lock className="h-3 w-3 text-emerald-400 group-hover:scale-110 transition-transform" />
+          <span className="font-medium">End-to-End Encrypted (AES-256)</span>
+          {isDataChannelOpen && (
+            <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" title="Direct P2P DataChannel Active" />
+          )}
+        </button>
       </div>
 
       {/* MAIN CONTENT AREA: Video Stage + Side Drawers */}
@@ -190,11 +202,6 @@ export const CallView: React.FC<CallViewProps> = ({
                     </div>
                   )}
 
-                  {/* Peer Speaking wave indicator border */}
-                  {peerState.audioEnabled && (
-                    <div className="absolute inset-0 border-2 border-emerald-500/0 transition-all pointer-events-none" />
-                  )}
-
                   {/* Hand Raised Badge */}
                   {peerState.isHandRaised && (
                     <div className="absolute top-4 left-4 flex items-center gap-1.5 rounded-full bg-amber-500/90 text-slate-950 px-3 py-1 text-xs font-bold shadow-lg animate-bounce">
@@ -214,6 +221,7 @@ export const CallView: React.FC<CallViewProps> = ({
                   {/* Bottom Name Label & Status */}
                   <div className="absolute bottom-4 left-4 flex items-center gap-2 rounded-full bg-black/60 backdrop-blur-md px-3 py-1.5 text-xs text-white border border-white/10">
                     <span className="font-medium">{peerState.alias}</span>
+                    <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" title="Direct Encrypted Peer" />
                     {!peerState.audioEnabled && (
                       <span className="flex h-4 w-4 items-center justify-center rounded-full bg-rose-600 text-white">
                         <MicOff className="h-2.5 w-2.5" />
@@ -324,7 +332,7 @@ export const CallView: React.FC<CallViewProps> = ({
                     Waiting for others to join
                   </h3>
                   <p className="text-xs text-[#9aa0a6] mt-1">
-                    Send this link to anyone you want in this call. No account is required to join.
+                    Send this link to anyone you want in this call. Zero login or account required.
                   </p>
                 </div>
 
@@ -347,9 +355,15 @@ export const CallView: React.FC<CallViewProps> = ({
                   </button>
                 </div>
 
-                <div className="pt-2 border-t border-[#3c4043] flex items-center gap-2 text-xs text-emerald-400">
-                  <ShieldCheck className="h-4 w-4 shrink-0" />
-                  <span>Direct WebRTC End-to-End Encryption active</span>
+                <div
+                  onClick={() => setIsE2EEModalOpen(true)}
+                  className="pt-2 border-t border-[#3c4043] flex items-center justify-between text-xs text-emerald-400 cursor-pointer hover:underline"
+                >
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 shrink-0" />
+                    <span>Direct WebRTC E2EE Active (AES-256)</span>
+                  </div>
+                  <span className="text-[11px] text-cyan-300">View code →</span>
                 </div>
               </div>
 
@@ -421,10 +435,11 @@ export const CallView: React.FC<CallViewProps> = ({
                       {peerState.alias.charAt(0).toUpperCase()}
                     </div>
                     <div>
-                      <div className="text-xs font-medium text-white">
-                        {peerState.alias}
+                      <div className="text-xs font-medium text-white flex items-center gap-1.5">
+                        <span>{peerState.alias}</span>
+                        <ShieldCheck className="h-3 w-3 text-emerald-400" title="End-to-End Encrypted" />
                       </div>
-                      <div className="text-[10px] text-[#9aa0a6]">Connected Peer</div>
+                      <div className="text-[10px] text-emerald-400">E2EE Verified Peer</div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 text-[#9aa0a6]">
@@ -474,12 +489,20 @@ export const CallView: React.FC<CallViewProps> = ({
 
               {/* Encryption Guarantee */}
               <div className="p-3.5 rounded-2xl bg-emerald-950/20 border border-emerald-500/20 space-y-2 text-xs text-[#9aa0a6]">
-                <div className="flex items-center gap-2 font-semibold text-emerald-300">
-                  <ShieldCheck className="h-4 w-4 text-emerald-400" />
-                  <span>End-to-End Encrypted</span>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-semibold text-emerald-300">
+                    <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                    <span>End-to-End Encrypted</span>
+                  </div>
+                  <button
+                    onClick={() => setIsE2EEModalOpen(true)}
+                    className="text-[11px] text-cyan-300 hover:underline cursor-pointer"
+                  >
+                    Verify Code
+                  </button>
                 </div>
                 <p className="text-[11px] leading-relaxed">
-                  Your audio, video, and screen sharing are directly encrypted peer-to-peer using WebRTC DTLS-SRTP. No third party or server can access your call.
+                  Audio & video use WebRTC DTLS-SRTP, and all messages are client-side encrypted with AES-256-GCM. No server or intermediate party can eavesdrop.
                 </p>
               </div>
             </div>
@@ -488,7 +511,7 @@ export const CallView: React.FC<CallViewProps> = ({
 
       </div>
 
-      {/* GOOGLE MEET CLASSIC BOTTOM CONTROLS DOCK */}
+      {/* GOOGLE MEET BOTTOM CONTROLS DOCK */}
       <footer className="absolute bottom-0 inset-x-0 h-20 bg-[#121418] border-t border-[#2d3139] px-4 sm:px-6 flex items-center justify-between z-30">
         
         {/* Left: Meeting code & Call duration */}
@@ -498,7 +521,7 @@ export const CallView: React.FC<CallViewProps> = ({
           <span className="text-xs text-[#9aa0a6]">{formatDuration(callDuration)}</span>
         </div>
 
-        {/* Center: Core Meeting Controls (Exact Google Meet round buttons) */}
+        {/* Center: Core Meeting Controls */}
         <div className="flex-1 flex items-center justify-center gap-2 sm:gap-3">
           
           {/* Mic Mute Toggle */}
@@ -634,6 +657,13 @@ export const CallView: React.FC<CallViewProps> = ({
         </div>
 
       </footer>
+
+      {/* E2EE Security Verification Dialog */}
+      <E2EEVerificationModal
+        isOpen={isE2EEModalOpen}
+        onClose={() => setIsE2EEModalOpen(false)}
+        details={e2eeDetails}
+      />
 
     </div>
   );

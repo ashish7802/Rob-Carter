@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { AnonymousUser, PeerState } from './types';
+import { AnonymousUser } from './types';
 import { generateRandomAlias } from './utils/alias';
 import { parseRoomFromUrl, updateUrlWithRoom } from './utils/invite';
 import { useSocket } from './hooks/useSocket';
@@ -39,7 +39,7 @@ export const App: React.FC = () => {
     console.log('[WebRTC Remote Stream Ready]:', stream.id);
   }, []);
 
-  // Socket signaling hook
+  // Socket signaling hook with E2EE crypto support
   const {
     socket,
     isConnected,
@@ -48,8 +48,10 @@ export const App: React.FC = () => {
     isInitiator,
     peerState,
     messages,
+    e2eeDetails,
     joinCustomRoom,
     sendMessage,
+    handleP2PMessage,
     toggleHandRaise,
     leaveSession,
   } = useSocket({
@@ -68,12 +70,17 @@ export const App: React.FC = () => {
     },
   });
 
-  // WebRTC Media & Calling hook
+  // WebRTC Media, DataChannel & Calling hook
   const webrtc = useWebRTC({
     socket,
     roomId: currentRoomId,
     isInitiator,
     onRemoteStreamReady: handleRemoteStream,
+    onDataChannelMessage: (msg) => {
+      if (msg && msg.text) {
+        handleP2PMessage(msg);
+      }
+    },
   });
 
   // Listen to URL changes for room invites
@@ -167,9 +174,11 @@ export const App: React.FC = () => {
           isAudioEnabled={webrtc.isAudioEnabled}
           isVideoEnabled={webrtc.isVideoEnabled}
           isScreenSharing={webrtc.isScreenSharing}
+          isDataChannelOpen={webrtc.isDataChannelOpen}
           audioLevel={webrtc.audioLevel}
           roomCode={currentRoomCode || 'MEETING'}
           messages={messages}
+          e2eeDetails={e2eeDetails}
           onToggleAudio={webrtc.toggleAudio}
           onToggleVideo={webrtc.toggleVideo}
           onToggleScreenShare={webrtc.toggleScreenShare}

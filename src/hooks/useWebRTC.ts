@@ -14,9 +14,16 @@ interface UseWebRTCProps {
   roomId: string | null;
   isInitiator: boolean;
   onRemoteStreamReady?: (stream: MediaStream) => void;
+  onDataChannelMessage?: (data: any) => void;
 }
 
-export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: UseWebRTCProps) {
+export function useWebRTC({
+  socket,
+  roomId,
+  isInitiator,
+  onRemoteStreamReady,
+  onDataChannelMessage,
+}: UseWebRTCProps) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
@@ -24,6 +31,7 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [connectionState, setConnectionState] = useState<RTCPeerConnectionState>('new');
+  const [isDataChannelOpen, setIsDataChannelOpen] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
 
   // Available devices
@@ -35,6 +43,7 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
   const [selectedAudioOutput, setSelectedAudioOutput] = useState<string>('');
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -77,7 +86,7 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
       }
       const ctx = audioContextRef.current;
       if (ctx.state === 'suspended') {
-        ctx.resume();
+        ctx.resume().catch(() => {});
       }
 
       const source = ctx.createMediaStreamSource(stream);
@@ -148,6 +157,24 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
 
         localStreamRef.current = stream;
         setLocalStream(stream);
+
+        // If active peer connection exists, update tracks
+        if (pcRef.current) {
+          const senders = pcRef.current.getSenders();
+          const videoTrack = stream.getVideoTracks()[0];
+          const audioTrack = stream.getAudioTracks()[0];
+
+          if (videoTrack) {
+            const vSender = senders.find((s) => s.track && s.track.kind === 'video');
+            if (vSender) vSender.replaceTrack(videoTrack);
+            else pcRef.current.addTrack(videoTrack, stream);
+          }
+          if (audioTrack) {
+            const aSender = senders.find((s) => s.track && s.track.kind === 'audio');
+            if (aSender) aSender.replaceTrack(audioTrack);
+            else pcRef.current.addTrack(audioTrack, stream);
+          }
+        }
 
         // Analyze audio for speaking activity
         startAudioAnalyzer(stream);
@@ -282,6 +309,45 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     }
   }, [isScreenSharing, isAudioEnabled, isVideoEnabled, socket, roomId]);
 
+  // Setup DataChannel event listeners
+  const setupDataChannelEvents = useCallback((dc: RTCDataChannel) => {
+    dataChannelRef.current = dc;
+
+    dc.onopen = () => {
+      console.log('[E2EE DataChannel]: Opened and ready for direct P2P messaging');
+      setIsDataChannelOpen(true);
+    };
+
+    dc.onclose = () => {
+      console.log('[E2EE DataChannel]: Closed');
+      setIsDataChannelOpen(false);
+    };
+
+    dc.onerror = (error) => {
+      console.warn('[E2EE DataChannel Error]:', error);
+    };
+
+    dc.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        if (onDataChannelMessage) {
+          onDataChannelMessage(parsed);
+        }
+      } catch (err) {
+        console.warn('Failed to parse direct DataChannel message:', err);
+      }
+    };
+  }, [onDataChannelMessage]);
+
+  // Send Direct P2P DataChannel message
+  const sendP2PMessage = useCallback((data: any): boolean => {
+    if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
+      dataChannelRef.current.send(JSON.stringify(data));
+      return true;
+    }
+    return false;
+  }, []);
+
   // Create RTCPeerConnection instance
   const createPeerConnection = useCallback(() => {
     if (pcRef.current) {
@@ -290,6 +356,16 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
 
     const pc = new RTCPeerConnection(ICE_SERVERS);
     pcRef.current = pc;
+
+    // Direct WebRTC DataChannel (E2EE P2P Channel)
+    if (isInitiator) {
+      const dc = pc.createDataChannel('e2ee_channel', { ordered: true });
+      setupDataChannelEvents(dc);
+    } else {
+      pc.ondatachannel = (event) => {
+        setupDataChannelEvents(event.channel);
+      };
+    }
 
     // Attach local stream tracks
     const currentStream = localStreamRef.current;
@@ -321,10 +397,14 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     // Monitor connection states
     pc.onconnectionstatechange = () => {
       setConnectionState(pc.connectionState);
+      if (pc.connectionState === 'failed') {
+        console.warn('[WebRTC]: Connection failed, attempting ICE restart...');
+        pc.restartIce?.();
+      }
     };
 
     return pc;
-  }, [socket, roomId, onRemoteStreamReady]);
+  }, [socket, roomId, isInitiator, onRemoteStreamReady, setupDataChannelEvents]);
 
   // Start Call (Initiate Offer)
   const startCall = useCallback(async () => {
@@ -360,7 +440,11 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
         while (iceCandidatesQueue.current.length > 0) {
           const candidate = iceCandidatesQueue.current.shift();
           if (candidate) {
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (e) {
+              console.warn('Buffered candidate apply error:', e);
+            }
           }
         }
 
@@ -388,7 +472,11 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
       while (iceCandidatesQueue.current.length > 0) {
         const candidate = iceCandidatesQueue.current.shift();
         if (candidate) {
-          await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+          try {
+            await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (e) {
+            console.warn('Buffered candidate apply error:', e);
+          }
         }
       }
     } catch (err) {
@@ -439,6 +527,10 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
 
   // End Call & Cleanup
   const endCall = useCallback(() => {
+    if (dataChannelRef.current) {
+      dataChannelRef.current.close();
+      dataChannelRef.current = null;
+    }
     if (pcRef.current) {
       pcRef.current.close();
       pcRef.current = null;
@@ -449,6 +541,7 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     }
     setRemoteStream(null);
     setIsScreenSharing(false);
+    setIsDataChannelOpen(false);
     setConnectionState('closed');
     iceCandidatesQueue.current = [];
   }, []);
@@ -457,7 +550,7 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
   useEffect(() => {
     return () => {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-      if (audioContextRef.current) audioContextRef.current.close();
+      if (audioContextRef.current) audioContextRef.current.close().catch(() => {});
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
       }
@@ -478,6 +571,7 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     isScreenSharing,
     audioLevel,
     connectionState,
+    isDataChannelOpen,
     cameraError,
     audioInputs,
     videoInputs,
@@ -494,6 +588,7 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     toggleScreenShare,
     startCall,
     endCall,
+    sendP2PMessage,
     enumerateDevices,
   };
 }
