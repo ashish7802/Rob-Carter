@@ -1,6 +1,6 @@
 {
-  "name": "Incognito: Anonymous Chat & Call",
-  "description": "Anonymous real-time chat, voice call, video call, screen share, and interactive whiteboard with zero tracking and privacy voice/video filters.",
+  "name": "AnonMeet - Anonymous E2EE Video Calls",
+  "description": "Clean, Google Meet-inspired anonymous video calls with end-to-end encryption, screen sharing, instant invite links, and zero accounts.",
   "requestFramePermissions": [
     "camera",
     "microphone",

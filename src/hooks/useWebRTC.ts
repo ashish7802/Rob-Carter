@@ -1,8 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Socket } from 'socket.io-client';
-import { VoiceFilterType, VideoFilterType } from '../types';
-import { AudioProcessor } from '../utils/audioFilter';
-import { VideoProcessor } from '../utils/videoFilter';
 
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
@@ -25,118 +22,160 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [activeVoiceFilter, setActiveVoiceFilter] = useState<VoiceFilterType>('none');
-  const [activeVideoFilter, setActiveVideoFilter] = useState<VideoFilterType>('none');
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [connectionState, setConnectionState] = useState<RTCPeerConnectionState>('new');
   const [cameraError, setCameraError] = useState<string | null>(null);
 
+  // Available devices
+  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
+  const [videoInputs, setVideoInputs] = useState<MediaDeviceInfo[]>([]);
+  const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioInput, setSelectedAudioInput] = useState<string>('');
+  const [selectedVideoInput, setSelectedVideoInput] = useState<string>('');
+  const [selectedAudioOutput, setSelectedAudioOutput] = useState<string>('');
+
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const rawStreamRef = useRef<MediaStream | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const audioProcessorRef = useRef<AudioProcessor | null>(null);
-  const videoProcessorRef = useRef<VideoProcessor | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
+  const iceCandidatesQueue = useRef<RTCIceCandidateInit[]>([]);
 
-  // Audio level analyzer loop for visualizer
-  const startAudioAnalyzer = useCallback((analyser: AnalyserNode) => {
-    analyserRef.current = analyser;
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+  // Enumerate input and output devices
+  const enumerateDevices = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const aIn = devices.filter((d) => d.kind === 'audioinput');
+      const vIn = devices.filter((d) => d.kind === 'videoinput');
+      const aOut = devices.filter((d) => d.kind === 'audiooutput');
 
-    const checkLevel = () => {
-      if (analyserRef.current) {
-        analyserRef.current.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
-        }
-        const avg = sum / dataArray.length;
-        setAudioLevel(Math.min(100, Math.round((avg / 255) * 100)));
+      setAudioInputs(aIn);
+      setVideoInputs(vIn);
+      setAudioOutputs(aOut);
+
+      if (!selectedAudioInput && aIn.length > 0) setSelectedAudioInput(aIn[0].deviceId);
+      if (!selectedVideoInput && vIn.length > 0) setSelectedVideoInput(vIn[0].deviceId);
+      if (!selectedAudioOutput && aOut.length > 0) setSelectedAudioOutput(aOut[0].deviceId);
+    } catch (err) {
+      console.warn('Enumerate devices failed:', err);
+    }
+  }, [selectedAudioInput, selectedVideoInput, selectedAudioOutput]);
+
+  // Audio level analyzer loop for Google Meet speaking wave rings
+  const startAudioAnalyzer = useCallback((stream: MediaStream) => {
+    try {
+      const audioTrack = stream.getAudioTracks()[0];
+      if (!audioTrack) return;
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioCtx();
       }
-      animFrameRef.current = requestAnimationFrame(checkLevel);
-    };
-    checkLevel();
+      const ctx = audioContextRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.6;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      const checkLevel = () => {
+        if (analyserRef.current) {
+          analyserRef.current.getByteFrequencyData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i];
+          }
+          const avg = sum / dataArray.length;
+          setAudioLevel(Math.min(100, Math.round((avg / 255) * 100)));
+        }
+        animFrameRef.current = requestAnimationFrame(checkLevel);
+      };
+      checkLevel();
+    } catch (e) {
+      console.warn('Audio analyzer error:', e);
+    }
   }, []);
 
   // Initialize Local Media Stream
-  const initLocalStream = useCallback(async (videoDesired = true, audioDesired = true) => {
-    try {
-      setCameraError(null);
-      let stream: MediaStream;
-
+  const initLocalStream = useCallback(
+    async (videoDesired = true, audioDesired = true, audioDeviceId?: string, videoDeviceId?: string) => {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: videoDesired ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } : false,
-          audio: audioDesired ? { echoCancellation: true, noiseSuppression: true } : false,
-        });
+        setCameraError(null);
+
+        // Stop existing tracks if any
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((t) => t.stop());
+        }
+
+        const constraints: MediaStreamConstraints = {
+          video: videoDesired
+            ? {
+                deviceId: videoDeviceId ? { exact: videoDeviceId } : undefined,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                facingMode: 'user',
+              }
+            : false,
+          audio: audioDesired
+            ? {
+                deviceId: audioDeviceId ? { exact: audioDeviceId } : undefined,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              }
+            : false,
+        };
+
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err: any) {
+          console.warn('Could not acquire full stream, attempting audio fallback...', err);
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          setIsVideoEnabled(false);
+        }
+
+        localStreamRef.current = stream;
+        setLocalStream(stream);
+
+        // Analyze audio for speaking activity
+        startAudioAnalyzer(stream);
+
+        // Re-enumerate devices to update labels
+        enumerateDevices();
+
+        return stream;
       } catch (err: any) {
-        console.warn('Could not get video+audio, trying audio only...', err);
-        // Fallback to audio only if camera is unavailable or denied
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        setIsVideoEnabled(false);
+        console.error('Failed to get user media:', err);
+        setCameraError('Please allow camera & microphone permissions to join the call.');
+        return null;
       }
-
-      rawStreamRef.current = stream;
-
-      // Initialize Audio Filter Processor
-      const audioProc = new AudioProcessor();
-      const { processedStream: processedAudioStream, analyser } = audioProc.init(stream);
-      audioProcessorRef.current = audioProc;
-      startAudioAnalyzer(analyser);
-
-      // Initialize Video Filter Processor if video track exists
-      let finalStream: MediaStream;
-      if (stream.getVideoTracks().length > 0) {
-        const videoProc = new VideoProcessor();
-        const { processedStream: processedVideoStream } = videoProc.init(stream);
-        videoProcessorRef.current = videoProc;
-
-        // Combine processed audio & processed video into single stream
-        const combinedTracks = [
-          ...processedVideoStream.getVideoTracks(),
-          ...processedAudioStream.getAudioTracks(),
-        ];
-        finalStream = new MediaStream(combinedTracks);
-      } else {
-        finalStream = processedAudioStream;
-      }
-
-      setLocalStream(finalStream);
-      return finalStream;
-    } catch (err: any) {
-      console.error('Failed to get media devices:', err);
-      setCameraError('Microphone or Camera access was denied or not found.');
-      return null;
-    }
-  }, [startAudioAnalyzer]);
-
-  // Set Voice Filter
-  const changeVoiceFilter = useCallback((filter: VoiceFilterType) => {
-    setActiveVoiceFilter(filter);
-    if (audioProcessorRef.current) {
-      audioProcessorRef.current.applyFilter(filter);
-    }
-  }, []);
-
-  // Set Video Filter
-  const changeVideoFilter = useCallback((filter: VideoFilterType) => {
-    setActiveVideoFilter(filter);
-    if (videoProcessorRef.current) {
-      videoProcessorRef.current.setFilter(filter);
-    }
-  }, []);
+    },
+    [startAudioAnalyzer, enumerateDevices]
+  );
 
   // Toggle Mic Audio
   const toggleAudio = useCallback(() => {
-    if (rawStreamRef.current) {
-      rawStreamRef.current.getAudioTracks().forEach((t) => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach((t) => {
         t.enabled = !isAudioEnabled;
       });
-      setIsAudioEnabled(!isAudioEnabled);
+      const newState = !isAudioEnabled;
+      setIsAudioEnabled(newState);
       if (socket && roomId) {
         socket.emit('media:state_change', {
-          audio: !isAudioEnabled,
+          audio: newState,
           video: isVideoEnabled,
           screenShare: isScreenSharing,
         });
@@ -144,65 +183,40 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     }
   }, [isAudioEnabled, isVideoEnabled, isScreenSharing, socket, roomId]);
 
-  // Toggle Video Camera
-  const toggleVideo = useCallback(async () => {
-    if (rawStreamRef.current) {
-      const tracks = rawStreamRef.current.getVideoTracks();
-      if (tracks.length > 0) {
-        const nextState = !isVideoEnabled;
-        tracks.forEach((t) => {
-          t.enabled = nextState;
+  // Toggle Camera Video
+  const toggleVideo = useCallback(() => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach((t) => {
+        t.enabled = !isVideoEnabled;
+      });
+      const newState = !isVideoEnabled;
+      setIsVideoEnabled(newState);
+      if (socket && roomId) {
+        socket.emit('media:state_change', {
+          audio: isAudioEnabled,
+          video: newState,
+          screenShare: isScreenSharing,
         });
-        setIsVideoEnabled(nextState);
-        if (socket && roomId) {
-          socket.emit('media:state_change', {
-            audio: isAudioEnabled,
-            video: nextState,
-            screenShare: isScreenSharing,
-          });
-        }
-      } else if (!isVideoEnabled) {
-        // Attempt to request video track if not present initially
-        try {
-          const videoOnly = await navigator.mediaDevices.getUserMedia({ video: true });
-          const newTrack = videoOnly.getVideoTracks()[0];
-          rawStreamRef.current.addTrack(newTrack);
-
-          if (!videoProcessorRef.current) {
-            const videoProc = new VideoProcessor();
-            const { processedStream } = videoProc.init(rawStreamRef.current);
-            videoProcessorRef.current = videoProc;
-            const procTrack = processedStream.getVideoTracks()[0];
-            localStream?.addTrack(procTrack);
-
-            if (pcRef.current && procTrack) {
-              pcRef.current.addTrack(procTrack, localStream!);
-            }
-          }
-          setIsVideoEnabled(true);
-        } catch (e) {
-          console.warn('Cannot enable camera:', e);
-        }
       }
     }
-  }, [isVideoEnabled, isAudioEnabled, isScreenSharing, localStream, socket, roomId]);
+  }, [isAudioEnabled, isVideoEnabled, isScreenSharing, socket, roomId]);
 
-  // Toggle Screen Sharing
+  // Toggle Screen Sharing (Present now)
   const toggleScreenShare = useCallback(async () => {
     if (isScreenSharing) {
-      // Stop Screen Share
+      // Stop Screen Share -> Revert to camera
       if (screenStreamRef.current) {
         screenStreamRef.current.getTracks().forEach((t) => t.stop());
         screenStreamRef.current = null;
       }
       setIsScreenSharing(false);
 
-      // Revert video sender to local video track if available
-      if (pcRef.current && localStream) {
-        const videoSender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
-        const localVideoTrack = localStream.getVideoTracks()[0];
-        if (videoSender && localVideoTrack) {
-          videoSender.replaceTrack(localVideoTrack);
+      if (localStreamRef.current && pcRef.current) {
+        const videoTrack = localStreamRef.current.getVideoTracks()[0];
+        const senders = pcRef.current.getSenders();
+        const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+        if (videoSender && videoTrack) {
+          videoSender.replaceTrack(videoTrack);
         }
       }
 
@@ -216,34 +230,34 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     } else {
       // Start Screen Share
       try {
-        const displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { cursor: 'always' } as any,
-          audio: true,
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false,
         });
 
-        screenStreamRef.current = displayStream;
+        screenStreamRef.current = screenStream;
         setIsScreenSharing(true);
 
-        const screenVideoTrack = displayStream.getVideoTracks()[0];
+        const screenVideoTrack = screenStream.getVideoTracks()[0];
 
-        // Replace video track in peer connection
+        // Replace track in peer connection
         if (pcRef.current) {
-          const videoSender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
+          const senders = pcRef.current.getSenders();
+          const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
           if (videoSender && screenVideoTrack) {
             videoSender.replaceTrack(screenVideoTrack);
-          } else if (screenVideoTrack) {
-            pcRef.current.addTrack(screenVideoTrack, displayStream);
           }
         }
 
-        // When user clicks browser's native "Stop Sharing" floating button
+        // Handle user stopping screen share via browser's native floating bar
         screenVideoTrack.onended = () => {
           setIsScreenSharing(false);
-          if (pcRef.current && localStream) {
-            const videoSender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
-            const localVideoTrack = localStream.getVideoTracks()[0];
-            if (videoSender && localVideoTrack) {
-              videoSender.replaceTrack(localVideoTrack);
+          if (localStreamRef.current && pcRef.current) {
+            const cameraTrack = localStreamRef.current.getVideoTracks()[0];
+            const senders = pcRef.current.getSenders();
+            const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+            if (videoSender && cameraTrack) {
+              videoSender.replaceTrack(cameraTrack);
             }
           }
           if (socket && roomId) {
@@ -262,14 +276,14 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
             screenShare: true,
           });
         }
-      } catch (err: any) {
-        console.warn('Screen share cancelled or failed:', err);
+      } catch (err) {
+        console.warn('Screen share cancelled or denied:', err);
       }
     }
-  }, [isScreenSharing, localStream, socket, roomId, isAudioEnabled, isVideoEnabled]);
+  }, [isScreenSharing, isAudioEnabled, isVideoEnabled, socket, roomId]);
 
-  // Establish WebRTC Connection
-  const createPeerConnection = useCallback((currentLocalStream: MediaStream) => {
+  // Create RTCPeerConnection instance
+  const createPeerConnection = useCallback(() => {
     if (pcRef.current) {
       pcRef.current.close();
     }
@@ -277,20 +291,24 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     const pc = new RTCPeerConnection(ICE_SERVERS);
     pcRef.current = pc;
 
-    // Track remote stream
-    const rStream = new MediaStream();
-    setRemoteStream(rStream);
-
-    pc.ontrack = (event) => {
-      console.log('[WebRTC ontrack]:', event.track.kind);
-      event.streams[0]?.getTracks().forEach((track) => {
-        rStream.addTrack(track);
+    // Attach local stream tracks
+    const currentStream = localStreamRef.current;
+    if (currentStream) {
+      currentStream.getTracks().forEach((track) => {
+        pc.addTrack(track, currentStream);
       });
-      if (onRemoteStreamReady) {
-        onRemoteStreamReady(rStream);
+    }
+
+    // Handle remote tracks
+    pc.ontrack = (event) => {
+      if (event.streams && event.streams[0]) {
+        const stream = event.streams[0];
+        setRemoteStream(stream);
+        if (onRemoteStreamReady) onRemoteStreamReady(stream);
       }
     };
 
+    // Send local ICE candidates to peer via socket
     pc.onicecandidate = (event) => {
       if (event.candidate && socket && roomId) {
         socket.emit('signal:ice_candidate', {
@@ -300,96 +318,126 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
       }
     };
 
+    // Monitor connection states
     pc.onconnectionstatechange = () => {
-      console.log('[WebRTC Connection State]:', pc.connectionState);
       setConnectionState(pc.connectionState);
     };
-
-    // Add local tracks to peer connection
-    currentLocalStream.getTracks().forEach((track) => {
-      pc.addTrack(track, currentLocalStream);
-    });
 
     return pc;
   }, [socket, roomId, onRemoteStreamReady]);
 
-  // Signaling message listeners
-  useEffect(() => {
+  // Start Call (Initiate Offer)
+  const startCall = useCallback(async () => {
     if (!socket || !roomId) return;
+    const pc = createPeerConnection();
 
-    const handleOffer = async (data: { sdp: RTCSessionDescriptionInit; senderId: string }) => {
-      console.log('[WebRTC]: Received offer');
-      let stream = localStream;
-      if (!stream) {
-        stream = await initLocalStream();
-      }
-      if (!stream) return;
+    try {
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
+      await pc.setLocalDescription(offer);
 
-      let pc = pcRef.current;
-      if (!pc || pc.connectionState === 'closed') {
-        pc = createPeerConnection(stream);
-      }
-
-      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      socket.emit('signal:answer', {
-        sdp: answer,
+      socket.emit('signal:offer', {
+        sdp: pc.localDescription,
         roomId,
       });
-    };
+    } catch (err) {
+      console.error('Failed to create WebRTC offer:', err);
+    }
+  }, [socket, roomId, createPeerConnection]);
 
-    const handleAnswer = async (data: { sdp: RTCSessionDescriptionInit; senderId: string }) => {
-      console.log('[WebRTC]: Received answer');
-      if (pcRef.current) {
-        await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      }
-    };
+  // Handle incoming Offer
+  const handleReceiveOffer = useCallback(
+    async (sdp: RTCSessionDescriptionInit) => {
+      if (!socket || !roomId) return;
+      const pc = createPeerConnection();
 
-    const handleIceCandidate = async (data: { candidate: RTCIceCandidateInit }) => {
       try {
-        if (pcRef.current && data.candidate) {
-          await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+
+        // Process buffered ICE candidates
+        while (iceCandidatesQueue.current.length > 0) {
+          const candidate = iceCandidatesQueue.current.shift();
+          if (candidate) {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          }
         }
-      } catch (e) {
-        console.warn('Error adding ICE candidate:', e);
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        socket.emit('signal:answer', {
+          sdp: pc.localDescription,
+          roomId,
+        });
+      } catch (err) {
+        console.error('Failed to handle incoming WebRTC offer:', err);
       }
+    },
+    [socket, roomId, createPeerConnection]
+  );
+
+  // Handle incoming Answer
+  const handleReceiveAnswer = useCallback(async (sdp: RTCSessionDescriptionInit) => {
+    if (!pcRef.current) return;
+    try {
+      await pcRef.current.setRemoteDescription(new RTCSessionDescription(sdp));
+
+      // Process buffered ICE candidates
+      while (iceCandidatesQueue.current.length > 0) {
+        const candidate = iceCandidatesQueue.current.shift();
+        if (candidate) {
+          await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+      }
+    } catch (err) {
+      console.error('Failed to handle incoming WebRTC answer:', err);
+    }
+  }, []);
+
+  // Handle incoming ICE Candidate
+  const handleReceiveCandidate = useCallback(async (candidate: RTCIceCandidateInit) => {
+    const pc = pcRef.current;
+    if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error('Error adding received ICE candidate:', err);
+      }
+    } else {
+      iceCandidatesQueue.current.push(candidate);
+    }
+  }, []);
+
+  // Socket Signaling Event Listeners
+  useEffect(() => {
+    if (!socket) return;
+
+    const onOffer = (data: { sdp: RTCSessionDescriptionInit }) => {
+      handleReceiveOffer(data.sdp);
     };
 
-    socket.on('signal:offer', handleOffer);
-    socket.on('signal:answer', handleAnswer);
-    socket.on('signal:ice_candidate', handleIceCandidate);
+    const onAnswer = (data: { sdp: RTCSessionDescriptionInit }) => {
+      handleReceiveAnswer(data.sdp);
+    };
+
+    const onIceCandidate = (data: { candidate: RTCIceCandidateInit }) => {
+      handleReceiveCandidate(data.candidate);
+    };
+
+    socket.on('signal:offer', onOffer);
+    socket.on('signal:answer', onAnswer);
+    socket.on('signal:ice_candidate', onIceCandidate);
 
     return () => {
-      socket.off('signal:offer', handleOffer);
-      socket.off('signal:answer', handleAnswer);
-      socket.off('signal:ice_candidate', handleIceCandidate);
+      socket.off('signal:offer', onOffer);
+      socket.off('signal:answer', onAnswer);
+      socket.off('signal:ice_candidate', onIceCandidate);
     };
-  }, [socket, roomId, localStream, initLocalStream, createPeerConnection]);
+  }, [socket, handleReceiveOffer, handleReceiveAnswer, handleReceiveCandidate]);
 
-  // Initiate call if user is initiator
-  const startCall = useCallback(async () => {
-    let stream = localStream;
-    if (!stream) {
-      stream = await initLocalStream();
-    }
-    if (!stream || !socket || !roomId) return;
-
-    const pc = createPeerConnection(stream);
-    const offer = await pc.createOffer({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: true,
-    });
-    await pc.setLocalDescription(offer);
-
-    socket.emit('signal:offer', {
-      sdp: offer,
-      roomId,
-    });
-  }, [localStream, socket, roomId, initLocalStream, createPeerConnection]);
-
-  // Cleanup on leave/unmount
+  // End Call & Cleanup
   const endCall = useCallback(() => {
     if (pcRef.current) {
       pcRef.current.close();
@@ -399,28 +447,28 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
       screenStreamRef.current.getTracks().forEach((t) => t.stop());
       screenStreamRef.current = null;
     }
-    setIsScreenSharing(false);
     setRemoteStream(null);
-    setConnectionState('new');
+    setIsScreenSharing(false);
+    setConnectionState('closed');
+    iceCandidatesQueue.current = [];
   }, []);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (animFrameRef.current) {
-        cancelAnimationFrame(animFrameRef.current);
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (audioContextRef.current) audioContextRef.current.close();
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
       }
-      if (audioProcessorRef.current) {
-        audioProcessorRef.current.destroy();
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
       }
-      if (videoProcessorRef.current) {
-        videoProcessorRef.current.destroy();
+      if (pcRef.current) {
+        pcRef.current.close();
       }
-      if (rawStreamRef.current) {
-        rawStreamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      endCall();
     };
-  }, [endCall]);
+  }, []);
 
   return {
     localStream,
@@ -428,18 +476,24 @@ export function useWebRTC({ socket, roomId, isInitiator, onRemoteStreamReady }: 
     isAudioEnabled,
     isVideoEnabled,
     isScreenSharing,
-    activeVoiceFilter,
-    activeVideoFilter,
     audioLevel,
     connectionState,
     cameraError,
+    audioInputs,
+    videoInputs,
+    audioOutputs,
+    selectedAudioInput,
+    selectedVideoInput,
+    selectedAudioOutput,
+    setSelectedAudioInput,
+    setSelectedVideoInput,
+    setSelectedAudioOutput,
     initLocalStream,
-    changeVoiceFilter,
-    changeVideoFilter,
     toggleAudio,
     toggleVideo,
     toggleScreenShare,
     startCall,
     endCall,
+    enumerateDevices,
   };
 }

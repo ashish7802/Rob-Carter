@@ -1,528 +1,429 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AnonymousUser, VoiceFilterType, VideoFilterType } from '../types';
-import { getAvatarSvg } from '../utils/alias';
+import { AnonymousUser } from '../types';
+import { generateMeetCode, getRoomInviteUrl, copyToClipboard } from '../utils/invite';
 import {
-  Users,
-  KeyRound,
-  Bot,
   Video,
   VideoOff,
   Mic,
   MicOff,
-  Sparkles,
+  Keyboard,
+  Plus,
+  Link2,
   ShieldCheck,
-  Zap,
   Lock,
-  Tag,
-  Radio,
-  Eye,
-  Sliders,
-  Volume2,
-  Tv,
+  ArrowRight,
+  Settings,
+  Copy,
+  Check,
+  Share2,
+  Sparkles,
+  Info,
+  RefreshCw,
 } from 'lucide-react';
 
 interface LobbyProps {
   currentUser: AnonymousUser;
-  isSearching: boolean;
   localStream: MediaStream | null;
   isAudioEnabled: boolean;
   isVideoEnabled: boolean;
-  activeVoiceFilter: VoiceFilterType;
-  activeVideoFilter: VideoFilterType;
   audioLevel: number;
-  onStartSearch: (interests: string[]) => void;
-  onCancelSearch: () => void;
-  onJoinCustomRoom: (roomCode: string) => void;
-  onStartAiChat: () => void;
+  invitedRoomCode?: string | null;
+  onJoinRoom: (roomCode: string) => void;
   onToggleAudio: () => void;
   onToggleVideo: () => void;
-  onChangeVoiceFilter: (filter: VoiceFilterType) => void;
-  onChangeVideoFilter: (filter: VideoFilterType) => void;
+  onOpenSettings: () => void;
+  onRegenerateUser: () => void;
+  onUpdateAlias: (newAlias: string) => void;
 }
-
-const INTEREST_TAGS = [
-  'Random',
-  'Deep Talk',
-  'Tech & Code',
-  'Gaming',
-  'Late Night',
-  'Philosophy',
-  'Music & Beats',
-  'Movies & Shows',
-  'Confessions',
-  'Cybersecurity',
-  'Debates',
-  'Anime',
-];
-
-const VOICE_FILTER_OPTIONS: { id: VoiceFilterType; label: string; desc: string }[] = [
-  { id: 'none', label: 'Natural', desc: 'No pitch modification' },
-  { id: 'deep', label: 'Deep Voice', desc: 'Low bass anonymizer' },
-  { id: 'helium', label: 'Helium', desc: 'High pitch modifier' },
-  { id: 'robot', label: 'Cyber Robot', desc: 'Ring-modulated robotic voice' },
-  { id: 'whisper', label: 'Whisper Spy', desc: 'Compressed stealth tone' },
-  { id: 'radio', label: 'Walkie-Talkie', desc: 'Lo-fi military comm effect' },
-];
-
-const VIDEO_FILTER_OPTIONS: { id: VideoFilterType; label: string }[] = [
-  { id: 'none', label: 'Standard' },
-  { id: 'privacy_blur', label: 'Privacy Blur' },
-  { id: 'cyber_hologram', label: 'Cyber Holo' },
-  { id: 'night_vision', label: 'Night Vision' },
-  { id: 'pixelate', label: 'Mosaic Pixel' },
-  { id: 'matrix', label: 'Matrix Code' },
-  { id: 'noir', label: 'Noir B&W' },
-];
 
 export const Lobby: React.FC<LobbyProps> = ({
   currentUser,
-  isSearching,
   localStream,
   isAudioEnabled,
   isVideoEnabled,
-  activeVoiceFilter,
-  activeVideoFilter,
   audioLevel,
-  onStartSearch,
-  onCancelSearch,
-  onJoinCustomRoom,
-  onStartAiChat,
+  invitedRoomCode,
+  onJoinRoom,
   onToggleAudio,
   onToggleVideo,
-  onChangeVoiceFilter,
-  onChangeVideoFilter,
+  onOpenSettings,
+  onRegenerateUser,
+  onUpdateAlias,
 }) => {
-  const [selectedInterests, setSelectedInterests] = useState<string[]>(['Random']);
-  const [roomCodeInput, setRoomCodeInput] = useState('');
-  const [activeTab, setActiveTab] = useState<'stranger' | 'custom_room' | 'ai'>('stranger');
-  const videoPreviewRef = useRef<HTMLVideoElement>(null);
+  const [meetingInput, setMeetingInput] = useState(invitedRoomCode || '');
+  const [showNewMeetingMenu, setShowNewMeetingMenu] = useState(false);
+  const [createdLaterLink, setCreatedLaterLink] = useState<string | null>(null);
+  const [copiedLaterLink, setCopiedLaterLink] = useState(false);
+  const [isEditingAlias, setIsEditingAlias] = useState(false);
+  const [aliasInput, setAliasInput] = useState(currentUser.alias);
 
-  // Attach local stream to preview element
+  const videoPreviewRef = useRef<HTMLVideoElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Sync invitedRoomCode
+  useEffect(() => {
+    if (invitedRoomCode) {
+      setMeetingInput(invitedRoomCode);
+    }
+  }, [invitedRoomCode]);
+
+  useEffect(() => {
+    setAliasInput(currentUser.alias);
+  }, [currentUser.alias]);
+
+  // Attach local stream to video preview
   useEffect(() => {
     if (videoPreviewRef.current && localStream) {
       videoPreviewRef.current.srcObject = localStream;
     }
-  }, [localStream]);
+  }, [localStream, isVideoEnabled]);
 
-  const toggleInterest = (tag: string) => {
-    if (tag === 'Random') {
-      setSelectedInterests(['Random']);
-      return;
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setShowNewMeetingMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleStartInstantMeeting = () => {
+    const code = generateMeetCode();
+    onJoinRoom(code);
+  };
+
+  const handleCreateMeetingForLater = () => {
+    const code = generateMeetCode();
+    const url = getRoomInviteUrl(code);
+    setCreatedLaterLink(url);
+    setShowNewMeetingMenu(false);
+  };
+
+  const handleJoinFromInput = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!meetingInput.trim()) return;
+
+    // Clean up input if user pasted a full URL or query param
+    let cleanCode = meetingInput.trim();
+    if (cleanCode.includes('?room=')) {
+      cleanCode = cleanCode.split('?room=')[1].split('&')[0];
+    } else if (cleanCode.includes('/room/')) {
+      cleanCode = cleanCode.split('/room/')[1].split('?')[0];
+    } else if (cleanCode.startsWith('http')) {
+      const parts = cleanCode.split('/');
+      cleanCode = parts[parts.length - 1];
     }
-    const filtered = selectedInterests.filter((t) => t !== 'Random');
-    if (filtered.includes(tag)) {
-      const next = filtered.filter((t) => t !== tag);
-      setSelectedInterests(next.length === 0 ? ['Random'] : next);
-    } else {
-      setSelectedInterests([...filtered, tag]);
+
+    onJoinRoom(cleanCode);
+  };
+
+  const handleCopyLaterLink = async () => {
+    if (!createdLaterLink) return;
+    const success = await copyToClipboard(createdLaterLink);
+    if (success) {
+      setCopiedLaterLink(true);
+      setTimeout(() => setCopiedLaterLink(false), 2500);
     }
   };
 
-  const handleGenerateRoomCode = () => {
-    const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let code = 'ANON-';
-    for (let i = 0; i < 4; i++) {
-      code += letters.charAt(Math.floor(Math.random() * letters.length));
+  const handleSaveAlias = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (aliasInput.trim()) {
+      onUpdateAlias(aliasInput.trim());
     }
-    setRoomCodeInput(code);
+    setIsEditingAlias(false);
   };
 
   return (
-    <main className="relative min-h-[calc(100vh-65px)] bg-cyber-grid bg-[#080a0f] p-4 sm:p-6 lg:p-8 flex items-center justify-center">
-      {/* Subtle background glow */}
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute bottom-10 right-10 w-72 h-72 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
-
-      <div className="relative z-10 w-full max-w-5xl mx-auto">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          
-          {/* Left Column: Device & Privacy Preview Card (5 cols) */}
-          <div className="lg:col-span-5 flex flex-col gap-4">
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 shadow-2xl backdrop-blur-xl">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800/80 mb-4">
-                <div className="flex items-center gap-2">
-                  <Eye className="h-4 w-4 text-emerald-400" />
-                  <span className="text-sm font-semibold text-slate-200">Hardware & Privacy Setup</span>
-                </div>
-                <span className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                  Ready
-                </span>
-              </div>
-
-              {/* Camera Preview Box */}
-              <div className="relative aspect-video w-full rounded-xl overflow-hidden bg-slate-950 border border-slate-800 flex items-center justify-center group shadow-inner">
-                {localStream && isVideoEnabled ? (
-                  <video
-                    ref={videoPreviewRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="h-full w-full object-cover -scale-x-100"
-                  />
-                ) : (
-                  <div className="flex flex-col items-center justify-center gap-3 p-4 text-center">
-                    <div
-                      className="h-16 w-16 rounded-2xl overflow-hidden shadow-lg border border-slate-700"
-                      dangerouslySetInnerHTML={{ __html: getAvatarSvg(currentUser.avatarSeed, currentUser.color) }}
-                    />
-                    <div>
-                      <p className="text-xs font-semibold text-slate-300">{currentUser.alias}</p>
-                      <p className="text-[11px] text-slate-500">Camera is muted or off</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Video Filter label badge */}
-                {activeVideoFilter !== 'none' && isVideoEnabled && (
-                  <div className="absolute top-2.5 left-2.5 rounded-md bg-slate-950/80 px-2 py-1 text-[10px] font-mono text-cyan-400 border border-cyan-500/30 backdrop-blur-sm">
-                    Filter: {VIDEO_FILTER_OPTIONS.find((f) => f.id === activeVideoFilter)?.label}
-                  </div>
-                )}
-
-                {/* Bottom hardware toggle buttons on preview */}
-                <div className="absolute bottom-2.5 inset-x-2.5 flex items-center justify-between rounded-lg bg-slate-950/70 p-1.5 backdrop-blur-md border border-slate-800/80">
-                  <div className="flex items-center gap-2">
-                    <button
-                      id="lobby-toggle-mic-btn"
-                      onClick={onToggleAudio}
-                      className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all cursor-pointer ${
-                        isAudioEnabled
-                          ? 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-                          : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                      }`}
-                    >
-                      {isAudioEnabled ? <Mic className="h-3.5 w-3.5 text-emerald-400" /> : <MicOff className="h-3.5 w-3.5" />}
-                      <span>{isAudioEnabled ? 'Mic On' : 'Muted'}</span>
-                    </button>
-
-                    <button
-                      id="lobby-toggle-cam-btn"
-                      onClick={onToggleVideo}
-                      className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all cursor-pointer ${
-                        isVideoEnabled
-                          ? 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-                          : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                      }`}
-                    >
-                      {isVideoEnabled ? <Video className="h-3.5 w-3.5 text-cyan-400" /> : <VideoOff className="h-3.5 w-3.5" />}
-                      <span>{isVideoEnabled ? 'Cam On' : 'Off'}</span>
-                    </button>
-                  </div>
-
-                  {/* Audio level meter */}
-                  <div className="flex items-center gap-1.5 px-2">
-                    <div className="flex items-end gap-0.5 h-3">
-                      <div
-                        className="w-1 bg-emerald-400 rounded-full transition-all duration-75"
-                        style={{ height: `${Math.max(2, (audioLevel / 100) * 12)}px` }}
-                      />
-                      <div
-                        className="w-1 bg-emerald-400 rounded-full transition-all duration-75"
-                        style={{ height: `${Math.max(2, (audioLevel / 100) * 16)}px` }}
-                      />
-                      <div
-                        className="w-1 bg-emerald-400 rounded-full transition-all duration-75"
-                        style={{ height: `${Math.max(2, (audioLevel / 100) * 10)}px` }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Privacy Video Filters Selector */}
-              <div className="mt-4">
-                <label className="block text-xs font-medium text-slate-400 mb-2 flex items-center justify-between">
-                  <span>Privacy Video Mask / Filter</span>
-                  <span className="text-[10px] text-slate-500">Processed locally</span>
-                </label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {VIDEO_FILTER_OPTIONS.map((filter) => (
-                    <button
-                      key={filter.id}
-                      id={`video-filter-${filter.id}`}
-                      onClick={() => onChangeVideoFilter(filter.id)}
-                      className={`rounded-lg px-2 py-1.5 text-[11px] font-medium border text-center transition-all cursor-pointer truncate ${
-                        activeVideoFilter === filter.id
-                          ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.15)]'
-                          : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                      }`}
-                    >
-                      {filter.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Voice Disguiser / Pitch Shifter Selector */}
-              <div className="mt-4 pt-3 border-t border-slate-800/80">
-                <label className="block text-xs font-medium text-slate-400 mb-2 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <Radio className="h-3.5 w-3.5 text-purple-400" />
-                    <span>Voice Anonymizer / Pitch FX</span>
-                  </span>
-                  <span className="text-[10px] font-mono text-purple-400">
-                    {VOICE_FILTER_OPTIONS.find((v) => v.id === activeVoiceFilter)?.label}
-                  </span>
-                </label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {VOICE_FILTER_OPTIONS.map((voice) => (
-                    <button
-                      key={voice.id}
-                      id={`voice-filter-${voice.id}`}
-                      onClick={() => onChangeVoiceFilter(voice.id)}
-                      className={`rounded-lg px-2 py-1.5 text-[11px] font-medium border text-center transition-all cursor-pointer truncate ${
-                        activeVoiceFilter === voice.id
-                          ? 'border-purple-500/60 bg-purple-500/15 text-purple-300 shadow-[0_0_10px_rgba(168,85,247,0.15)]'
-                          : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                      }`}
-                    >
-                      {voice.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Privacy Guarantee Pill */}
-            <div className="rounded-xl border border-slate-800/80 bg-slate-900/50 p-3.5 flex items-center gap-3">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <Lock className="h-4 w-4" />
-              </div>
-              <div className="text-xs text-slate-400">
-                <span className="font-semibold text-slate-300">100% Anonymity:</span> Direct peer-to-peer WebRTC encryption. No chat logs, no account signup, self-destructing data.
-              </div>
-            </div>
+    <main className="min-h-[calc(100vh-64px)] bg-[#121418] text-[#f1f3f4] flex items-center justify-center p-4 sm:p-6 lg:p-10">
+      <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
+        
+        {/* LEFT COLUMN: Actions & Info */}
+        <div className="lg:col-span-6 space-y-6">
+          <div className="space-y-3">
+            <h1 className="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight text-white font-['Google_Sans',sans-serif] leading-tight">
+              Anonymous video calls. <br />
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-emerald-400">
+                End-to-End Encrypted.
+              </span>
+            </h1>
+            <p className="text-sm sm:text-base text-[#9aa0a6] max-w-lg leading-relaxed">
+              Experience private video conferencing with direct peer-to-peer WebRTC encryption, instant 1-click invite links, and zero accounts.
+            </p>
           </div>
 
-          {/* Right Column: Matchmaker / Room Center (7 cols) */}
-          <div className="lg:col-span-7 flex flex-col gap-4">
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-6 shadow-2xl backdrop-blur-xl">
-              {/* Top Navigation Tabs */}
-              <div className="flex items-center gap-2 p-1 bg-slate-950 rounded-xl border border-slate-800/80 mb-6">
+          {/* Action Row: New Meeting & Join Input */}
+          <div className="space-y-4 pt-2">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+              {/* New Meeting Dropdown */}
+              <div className="relative" ref={dropdownRef}>
                 <button
-                  id="tab-stranger-btn"
-                  onClick={() => setActiveTab('stranger')}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                    activeTab === 'stranger'
-                      ? 'bg-gradient-to-r from-emerald-500/20 to-teal-500/20 text-emerald-300 border border-emerald-500/30 shadow-md'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
+                  id="new-meeting-btn"
+                  onClick={() => setShowNewMeetingMenu(!showNewMeetingMenu)}
+                  className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-full bg-cyan-600 hover:bg-cyan-500 active:scale-98 px-6 py-3 text-sm font-medium text-white shadow-lg shadow-cyan-950/50 transition-all cursor-pointer"
                 >
-                  <Users className="h-4 w-4 text-emerald-400" />
-                  <span>Random Stranger</span>
+                  <Video className="h-4 w-4" />
+                  <span>New meeting</span>
                 </button>
-                <button
-                  id="tab-custom-room-btn"
-                  onClick={() => setActiveTab('custom_room')}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                    activeTab === 'custom_room'
-                      ? 'bg-gradient-to-r from-cyan-500/20 to-blue-500/20 text-cyan-300 border border-cyan-500/30 shadow-md'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <KeyRound className="h-4 w-4 text-cyan-400" />
-                  <span>Private Room Code</span>
-                </button>
-                <button
-                  id="tab-ai-btn"
-                  onClick={() => setActiveTab('ai')}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                    activeTab === 'ai'
-                      ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/20 text-purple-300 border border-purple-500/30 shadow-md'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <Bot className="h-4 w-4 text-purple-400" />
-                  <span>Phantom AI</span>
-                </button>
+
+                {showNewMeetingMenu && (
+                  <div className="absolute left-0 top-full mt-2 w-64 rounded-2xl border border-[#3c4043] bg-[#202124] shadow-2xl p-2 z-40 animate-in fade-in zoom-in-95 duration-150">
+                    <button
+                      id="start-instant-meeting-btn"
+                      onClick={handleStartInstantMeeting}
+                      className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-xs text-left text-[#e8eaed] hover:bg-[#303134] transition-colors cursor-pointer"
+                    >
+                      <Plus className="h-4 w-4 text-cyan-400" />
+                      <div>
+                        <div className="font-medium text-white">Start an instant meeting</div>
+                        <div className="text-[11px] text-[#9aa0a6]">Get connected immediately</div>
+                      </div>
+                    </button>
+
+                    <button
+                      id="create-meeting-later-btn"
+                      onClick={handleCreateMeetingForLater}
+                      className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-xs text-left text-[#e8eaed] hover:bg-[#303134] transition-colors cursor-pointer mt-1"
+                    >
+                      <Link2 className="h-4 w-4 text-emerald-400" />
+                      <div>
+                        <div className="font-medium text-white">Create a meeting for later</div>
+                        <div className="text-[11px] text-[#9aa0a6]">Get a shareable link to send</div>
+                      </div>
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* Tab Content 1: Random Stranger */}
-              {activeTab === 'stranger' && (
-                <div className="space-y-6">
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <h2 className="text-base font-bold text-white flex items-center gap-2">
-                        <Tag className="h-4 w-4 text-emerald-400" />
-                        <span>Match by Interests & Topics</span>
-                      </h2>
-                      <span className="text-xs text-slate-400 font-mono">
-                        {selectedInterests.length} selected
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-400 mb-3">
-                      Select interests to be paired with someone who shares your topics, or leave on &quot;Random&quot; for instant discovery.
-                    </p>
+              {/* Code or Link Input Form */}
+              <form onSubmit={handleJoinFromInput} className="flex-1 flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Keyboard className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9aa0a6]" />
+                  <input
+                    id="meeting-code-input"
+                    type="text"
+                    placeholder="Enter a code or link"
+                    value={meetingInput}
+                    onChange={(e) => setMeetingInput(e.target.value)}
+                    className="w-full rounded-full border border-[#3c4043] bg-[#1e2229] pl-10 pr-4 py-3 text-sm text-white placeholder-[#9aa0a6] focus:border-cyan-500 focus:outline-none transition-colors"
+                  />
+                </div>
+                <button
+                  id="join-meeting-btn"
+                  type="submit"
+                  disabled={!meetingInput.trim()}
+                  className={`rounded-full px-5 py-3 text-sm font-medium transition-all cursor-pointer ${
+                    meetingInput.trim()
+                      ? 'text-cyan-400 hover:bg-cyan-500/10 font-semibold'
+                      : 'text-[#5f6368] cursor-not-allowed'
+                  }`}
+                >
+                  Join
+                </button>
+              </form>
+            </div>
 
-                    {/* Interest Tags Grid */}
-                    <div className="flex flex-wrap gap-2">
-                      {INTEREST_TAGS.map((tag) => {
-                        const isSelected = selectedInterests.includes(tag);
-                        return (
-                          <button
-                            key={tag}
-                            id={`interest-tag-${tag.toLowerCase().replace(/[^a-z0-9]/g, '-')}`}
-                            onClick={() => toggleInterest(tag)}
-                            className={`rounded-xl px-3 py-1.5 text-xs font-medium border transition-all cursor-pointer ${
-                              isSelected
-                                ? 'border-emerald-500/60 bg-emerald-500/20 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.2)]'
-                                : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                            }`}
-                          >
-                            {isSelected ? '✓ ' : ''}{tag}
-                          </button>
-                        );
-                      })}
-                    </div>
+            {/* Created Later Link Banner */}
+            {createdLaterLink && (
+              <div className="rounded-2xl border border-cyan-500/30 bg-cyan-950/30 p-4 animate-in fade-in duration-200">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-cyan-300 flex items-center gap-1.5">
+                    <Link2 className="h-3.5 w-3.5 text-cyan-400" />
+                    <span>Here's your joining link</span>
+                  </span>
+                  <button
+                    onClick={() => setCreatedLaterLink(null)}
+                    className="text-xs text-[#9aa0a6] hover:text-white"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 rounded-xl border border-[#3c4043] bg-[#121418] p-1.5">
+                  <input
+                    type="text"
+                    readOnly
+                    value={createdLaterLink}
+                    className="flex-1 bg-transparent px-2.5 py-1 text-xs font-mono text-cyan-300 focus:outline-none select-all truncate"
+                  />
+                  <button
+                    onClick={handleCopyLaterLink}
+                    className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                      copiedLaterLink ? 'bg-emerald-600 text-white' : 'bg-cyan-600 hover:bg-cyan-500 text-white'
+                    }`}
+                  >
+                    {copiedLaterLink ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    <span>{copiedLaterLink ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Invited Room Alert Card (if joined via invite link) */}
+          {invitedRoomCode && (
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/20 p-4 flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                <Link2 className="h-5 w-5" />
+              </div>
+              <div className="flex-1">
+                <div className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                  Meeting Invitation
+                </div>
+                <p className="text-xs text-[#e8eaed] mt-0.5">
+                  You are invited to join meeting <strong className="font-mono text-cyan-300">{invitedRoomCode}</strong>. Check your camera & mic on the right and click <strong>Join now</strong> when you're ready.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Security Features Bullet Points */}
+          <div className="pt-4 border-t border-[#2d3139] grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-[#9aa0a6]">
+            <div className="flex items-center gap-2">
+              <Lock className="h-4 w-4 text-emerald-400 shrink-0" />
+              <span>Direct WebRTC P2P Encryption</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="h-4 w-4 text-cyan-400 shrink-0" />
+              <span>Zero logs, cookies, or trackers</span>
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT COLUMN: Green Room Video Preview Card */}
+        <div className="lg:col-span-6 flex flex-col items-center">
+          <div className="w-full max-w-md space-y-4">
+            
+            {/* Live Camera View Box */}
+            <div className="relative aspect-[16/10] w-full rounded-3xl border border-[#3c4043] bg-[#202124] overflow-hidden shadow-2xl flex items-center justify-center">
+              {isVideoEnabled && localStream ? (
+                <video
+                  ref={videoPreviewRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="h-full w-full object-cover -scale-x-100"
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-3">
+                  <div
+                    className="flex h-20 w-20 items-center justify-center rounded-full text-2xl font-bold text-slate-950 font-mono shadow-xl"
+                    style={{ backgroundColor: currentUser.color || '#10b981' }}
+                  >
+                    {currentUser.alias.charAt(0).toUpperCase()}
                   </div>
+                  <div className="text-xs font-medium text-[#9aa0a6]">
+                    Camera is off
+                  </div>
+                </div>
+              )}
 
-                  {/* Searching State or Action Button */}
-                  {isSearching ? (
-                    <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/20 p-6 text-center space-y-4">
-                      <div className="relative mx-auto h-20 w-20 flex items-center justify-center">
-                        <div className="absolute inset-0 rounded-full border border-emerald-500/40 animate-ping" />
-                        <div className="absolute inset-2 rounded-full border-2 border-dashed border-emerald-400 animate-spin" />
-                        <div className="h-10 w-10 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
-                          <Users className="h-5 w-5" />
-                        </div>
-                      </div>
+              {/* Audio Speaking Ring Overlay when mic is active */}
+              {isAudioEnabled && audioLevel > 12 && (
+                <div
+                  className="absolute bottom-4 left-4 flex items-center gap-1.5 rounded-full bg-slate-950/80 px-2.5 py-1 text-[11px] text-emerald-400 backdrop-blur-md border border-emerald-500/30"
+                >
+                  <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Speaking</span>
+                </div>
+              )}
 
-                      <div>
-                        <h3 className="text-base font-bold text-white">Scanning for an Anonymous Stranger...</h3>
-                        <p className="text-xs text-slate-400 mt-1">
-                          Looking for matching interests: <span className="text-emerald-400 font-mono">{selectedInterests.join(', ')}</span>
-                        </p>
-                      </div>
+              {/* Bottom Center Media Controls Pill */}
+              <div className="absolute bottom-4 inset-x-0 flex items-center justify-center gap-3 z-10">
+                <button
+                  id="preview-toggle-mic-btn"
+                  onClick={onToggleAudio}
+                  title={isAudioEnabled ? 'Turn off microphone' : 'Turn on microphone'}
+                  className={`flex h-11 w-11 items-center justify-center rounded-full transition-all cursor-pointer shadow-lg ${
+                    isAudioEnabled
+                      ? 'bg-[#3c4043] hover:bg-[#4a4e51] text-white'
+                      : 'bg-rose-600 hover:bg-rose-500 text-white'
+                  }`}
+                >
+                  {isAudioEnabled ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
+                </button>
 
-                      <button
-                        id="cancel-search-btn"
-                        onClick={onCancelSearch}
-                        className="rounded-xl border border-rose-500/40 bg-rose-500/15 px-6 py-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-all cursor-pointer"
-                      >
-                        Cancel Search
-                      </button>
-                    </div>
+                <button
+                  id="preview-toggle-camera-btn"
+                  onClick={onToggleVideo}
+                  title={isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
+                  className={`flex h-11 w-11 items-center justify-center rounded-full transition-all cursor-pointer shadow-lg ${
+                    isVideoEnabled
+                      ? 'bg-[#3c4043] hover:bg-[#4a4e51] text-white'
+                      : 'bg-rose-600 hover:bg-rose-500 text-white'
+                  }`}
+                >
+                  {isVideoEnabled ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
+                </button>
+
+                <button
+                  id="preview-open-settings-btn"
+                  onClick={onOpenSettings}
+                  title="Device settings"
+                  className="flex h-11 w-11 items-center justify-center rounded-full bg-[#3c4043] hover:bg-[#4a4e51] text-white transition-all cursor-pointer shadow-lg"
+                >
+                  <Settings className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Joining Identity & Quick Join CTA */}
+            <div className="flex items-center justify-between p-3.5 rounded-2xl border border-[#2d3139] bg-[#1e2229]">
+              <div className="flex items-center gap-2.5">
+                <div
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold text-slate-950 font-mono shadow-inner"
+                  style={{ backgroundColor: currentUser.color || '#10b981' }}
+                >
+                  {currentUser.alias.charAt(0).toUpperCase()}
+                </div>
+                <div>
+                  <div className="text-[11px] text-[#9aa0a6]">Joining as</div>
+                  {isEditingAlias ? (
+                    <form onSubmit={handleSaveAlias} className="flex items-center">
+                      <input
+                        type="text"
+                        autoFocus
+                        value={aliasInput}
+                        onChange={(e) => setAliasInput(e.target.value)}
+                        onBlur={handleSaveAlias}
+                        className="w-32 bg-[#121418] text-xs font-medium text-white px-1.5 py-0.5 rounded border border-cyan-500 focus:outline-none"
+                        maxLength={24}
+                      />
+                    </form>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="flex items-center gap-1.5">
                       <button
-                        id="start-stranger-match-btn"
-                        onClick={() => onStartSearch(selectedInterests)}
-                        className="w-full flex items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 px-6 py-4 text-base font-bold text-slate-950 shadow-[0_0_25px_rgba(16,185,129,0.35)] hover:shadow-[0_0_35px_rgba(16,185,129,0.5)] hover:brightness-110 active:scale-[0.99] transition-all cursor-pointer"
+                        onClick={() => setIsEditingAlias(true)}
+                        className="text-xs font-bold text-white hover:text-cyan-400 transition-colors cursor-pointer text-left truncate max-w-[140px]"
                       >
-                        <Zap className="h-5 w-5 fill-slate-950" />
-                        <span>Start Anonymous Instant Match</span>
+                        {currentUser.alias}
                       </button>
-                      <p className="text-center text-[11px] text-slate-500">
-                        Zero trace. Full Video, Audio, Screen Share and Real-time Chat ready on connect.
-                      </p>
+                      <button
+                        onClick={onRegenerateUser}
+                        title="Randomize display name"
+                        className="text-[#9aa0a6] hover:text-white transition-colors cursor-pointer"
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                      </button>
                     </div>
                   )}
                 </div>
-              )}
-
-              {/* Tab Content 2: Private Custom Room */}
-              {activeTab === 'custom_room' && (
-                <div className="space-y-6">
-                  <div>
-                    <h2 className="text-base font-bold text-white flex items-center gap-2 mb-1">
-                      <KeyRound className="h-4 w-4 text-cyan-400" />
-                      <span>Direct Secret Room Code</span>
-                    </h2>
-                    <p className="text-xs text-slate-400">
-                      Create or join a private ephemeral room code. Share the code with someone to meet directly in a secure anonymous space.
-                    </p>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                        Room Code (4-12 characters)
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          id="room-code-input"
-                          type="text"
-                          value={roomCodeInput}
-                          onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase())}
-                          placeholder="e.g. ANON-892"
-                          maxLength={16}
-                          className="flex-1 rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm font-mono tracking-wider text-white placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
-                        />
-                        <button
-                          id="generate-code-btn"
-                          onClick={handleGenerateRoomCode}
-                          className="rounded-xl border border-slate-800 bg-slate-800/80 px-4 py-3 text-xs font-medium text-slate-300 hover:border-slate-700 hover:text-white transition-all cursor-pointer whitespace-nowrap"
-                        >
-                          Auto Generate
-                        </button>
-                      </div>
-                    </div>
-
-                    <button
-                      id="join-room-btn"
-                      onClick={() => onJoinCustomRoom(roomCodeInput || 'ANON-777')}
-                      className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-3.5 text-sm font-bold text-white shadow-[0_0_20px_rgba(6,182,212,0.3)] hover:brightness-110 active:scale-[0.99] transition-all cursor-pointer"
-                    >
-                      <Lock className="h-4 w-4" />
-                      <span>Enter Private Room ({roomCodeInput || 'ANON-777'})</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Tab Content 3: Phantom AI Incognito Companion */}
-              {activeTab === 'ai' && (
-                <div className="space-y-6">
-                  <div className="flex items-start gap-3 rounded-xl border border-purple-500/30 bg-purple-950/20 p-4">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                      <Sparkles className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <h2 className="text-sm font-bold text-white">Phantom AI Incognito Partner</h2>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        Practice voice/video filters, have deep late-night philosophical conversations, or debate intriguing topics with a privacy-respecting AI companion powered by Gemini.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <button
-                      id="start-ai-companion-btn"
-                      onClick={onStartAiChat}
-                      className="w-full flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-purple-500 to-pink-600 px-6 py-4 text-base font-bold text-white shadow-[0_0_25px_rgba(168,85,247,0.3)] hover:brightness-110 active:scale-[0.99] transition-all cursor-pointer"
-                    >
-                      <Bot className="h-5 w-5" />
-                      <span>Connect with Phantom AI</span>
-                    </button>
-                    <p className="text-center text-[11px] text-slate-500">
-                      Zero conversation history is logged. All responses run ephemeral on server.
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Features Featurette Bar */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 p-3 text-center">
-                <Tv className="h-4 w-4 mx-auto text-cyan-400 mb-1" />
-                <h4 className="text-xs font-semibold text-slate-200">Screen Sharing</h4>
-                <p className="text-[10px] text-slate-500">Share apps or browser tabs</p>
               </div>
-              <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 p-3 text-center">
-                <Radio className="h-4 w-4 mx-auto text-purple-400 mb-1" />
-                <h4 className="text-xs font-semibold text-slate-200">Voice Shifter</h4>
-                <p className="text-[10px] text-slate-500">Deep, robot & helium filters</p>
-              </div>
-              <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 p-3 text-center">
-                <ShieldCheck className="h-4 w-4 mx-auto text-emerald-400 mb-1" />
-                <h4 className="text-xs font-semibold text-slate-200">Ephemeral Chat</h4>
-                <p className="text-[10px] text-slate-500">Self-destructing messages</p>
-              </div>
+
+              {/* Ready to Join Action */}
+              <button
+                id="green-room-join-btn"
+                onClick={() => onJoinRoom(meetingInput.trim() || generateMeetCode())}
+                className="flex items-center gap-2 rounded-full bg-cyan-600 hover:bg-cyan-500 active:scale-95 px-5 py-2.5 text-xs font-semibold text-white shadow-md transition-all cursor-pointer"
+              >
+                <span>{invitedRoomCode ? 'Join now' : 'Start meeting'}</span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
-
         </div>
+
       </div>
     </main>
   );

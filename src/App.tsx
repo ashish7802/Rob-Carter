@@ -1,347 +1,232 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { AnonymousUser, VoiceFilterType, VideoFilterType, PeerState, ChatMessage } from './types';
+import React, { useState, useEffect, useCallback } from 'react';
+import { AnonymousUser, PeerState } from './types';
 import { generateRandomAlias } from './utils/alias';
+import { parseRoomFromUrl, updateUrlWithRoom } from './utils/invite';
 import { useSocket } from './hooks/useSocket';
 import { useWebRTC } from './hooks/useWebRTC';
 import { Navbar } from './components/Navbar';
 import { Lobby } from './components/Lobby';
 import { CallView } from './components/CallView';
-import { ChatPanel } from './components/ChatPanel';
-import { WhiteboardModal } from './components/WhiteboardModal';
-import { SoundboardModal } from './components/SoundboardModal';
 import { SettingsModal } from './components/SettingsModal';
-import { MessageSquare, Video, ArrowLeft, ShieldAlert } from 'lucide-react';
+import { InviteModal } from './components/InviteModal';
 
-export default function App() {
-  // Current user anonymous profile
+export const App: React.FC = () => {
+  // Anonymous Identity
   const [currentUser, setCurrentUser] = useState<AnonymousUser>(() => {
+    const saved = localStorage.getItem('anon_user');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
     const initial = generateRandomAlias();
-    return {
-      id: '',
+    const user: AnonymousUser = {
+      id: `user_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       alias: initial.alias,
       avatarSeed: initial.avatarSeed,
       color: initial.color,
-      status: 'idle',
     };
+    localStorage.setItem('anon_user', JSON.stringify(user));
+    return user;
   });
 
-  const [activeMode, setActiveMode] = useState<'stranger' | 'custom_room' | 'ai'>('stranger');
-  const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(false);
-  const [isSoundboardOpen, setIsSoundboardOpen] = useState(false);
+  const [invitedRoomCode, setInvitedRoomCode] = useState<string | null>(() => parseRoomFromUrl());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [mobileTab, setMobileTab] = useState<'video' | 'chat'>('video');
-  const [aiCompanionMessages, setAiCompanionMessages] = useState<ChatMessage[]>([]);
+  const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
 
-  // Socket Hook
+  // WebRTC remote stream handler callback
+  const handleRemoteStream = useCallback((stream: MediaStream) => {
+    console.log('[WebRTC Remote Stream Ready]:', stream.id);
+  }, []);
+
+  // Socket signaling hook
   const {
     socket,
     isConnected,
-    onlineStats,
-    isSearching,
     currentRoomId,
     currentRoomCode,
     isInitiator,
     peerState,
-    messages: socketMessages,
-    isPeerTyping,
-    floatingReactions,
-    whiteboardStrokes,
-    updateProfile,
-    startStrangerSearch,
-    cancelStrangerSearch,
-    skipStranger,
+    messages,
     joinCustomRoom,
     sendMessage,
-    sendTyping,
-    sendReaction,
-    emitStroke,
-    emitClearWhiteboard,
+    toggleHandRaise,
     leaveSession,
   } = useSocket({
     currentUser,
     onMatched: (peer, roomId, initiator) => {
-      console.log('[App]: Matched with peer:', peer.alias, 'Initiator:', initiator);
+      console.log('[Room Peer Connected]:', peer.alias, 'initiator:', initiator);
       if (initiator) {
-        // Start WebRTC call as initiator
         setTimeout(() => {
           webrtc.startCall();
-        }, 500);
+        }, 400);
       }
     },
     onPeerDisconnected: (reason) => {
+      console.log('[Peer Disconnected]:', reason);
       webrtc.endCall();
     },
   });
 
-  // WebRTC Hook
+  // WebRTC Media & Calling hook
   const webrtc = useWebRTC({
     socket,
     roomId: currentRoomId,
     isInitiator,
+    onRemoteStreamReady: handleRemoteStream,
   });
 
-  // Pre-initialize local media preview on mount
+  // Listen to URL changes for room invites
+  useEffect(() => {
+    const handlePopState = () => {
+      const room = parseRoomFromUrl();
+      if (room) {
+        setInvitedRoomCode(room);
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Pre-initialize local media preview on app mount
   useEffect(() => {
     webrtc.initLocalStream(true, true);
+    webrtc.enumerateDevices();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Handle Regenerate Alias
-  const handleRegenerateAlias = () => {
+  // Regenerate random pseudonym
+  const handleRegenerateUser = () => {
     const fresh = generateRandomAlias();
-    const updated = {
+    const updated: AnonymousUser = {
       ...currentUser,
       alias: fresh.alias,
       avatarSeed: fresh.avatarSeed,
       color: fresh.color,
     };
     setCurrentUser(updated);
-    updateProfile(fresh.alias, fresh.avatarSeed);
-  };
-
-  const handleUpdateUser = (alias: string, avatarSeed: string, color: string) => {
-    const updated = { ...currentUser, alias, avatarSeed, color };
-    setCurrentUser(updated);
-    updateProfile(alias, avatarSeed);
-  };
-
-  // Stranger Match Handlers
-  const handleStartStrangerMatch = (interests: string[]) => {
-    setActiveMode('stranger');
-    startStrangerSearch(interests);
-  };
-
-  // Custom Room Handlers
-  const handleJoinCustomRoom = (roomCode: string) => {
-    setActiveMode('custom_room');
-    joinCustomRoom(roomCode);
-    setTimeout(() => {
-      webrtc.startCall();
-    }, 800);
-  };
-
-  // AI Incognito Companion Mode Handlers
-  const handleStartAiCompanion = () => {
-    setActiveMode('ai');
-    const welcomeMsg: ChatMessage = {
-      id: `ai_${Date.now()}`,
-      senderId: 'ai-phantom',
-      senderAlias: 'Phantom AI',
-      senderAvatarSeed: 'phantom-ai-matrix',
-      text: "Greetings, traveler of the dark web. I am Phantom AI, your anonymous conversation companion. What thoughts or secrets would you like to explore today?",
-      timestamp: Date.now(),
-    };
-    setAiCompanionMessages([welcomeMsg]);
-  };
-
-  const handleSendAiMessage = async (
-    text?: string,
-    mediaUrl?: string,
-    mediaType?: 'image' | 'audio' | 'voice_note',
-    ephemeralSeconds?: number
-  ) => {
-    if (!text?.trim() && !mediaUrl) return;
-
-    const userMsg: ChatMessage = {
-      id: `usr_${Date.now()}`,
-      senderId: currentUser.id || 'local-user',
-      senderAlias: currentUser.alias,
-      senderAvatarSeed: currentUser.avatarSeed,
-      text,
-      mediaUrl,
-      mediaType,
-      ephemeralSeconds,
-      timestamp: Date.now(),
-    };
-
-    setAiCompanionMessages((prev) => [...prev, userMsg]);
-
-    if (text?.trim()) {
-      try {
-        const res = await fetch('/api/ai/companion-chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: [...aiCompanionMessages, userMsg].map((m) => ({
-              sender: m.senderId === 'ai-phantom' ? 'model' : 'user',
-              text: m.text || '',
-            })),
-            userAlias: currentUser.alias,
-          }),
-        });
-        const data = await res.json();
-        const aiMsg: ChatMessage = {
-          id: `ai_${Date.now()}`,
-          senderId: 'ai-phantom',
-          senderAlias: 'Phantom AI',
-          senderAvatarSeed: 'phantom-ai-matrix',
-          text: data.reply || "Transmission received.",
-          timestamp: Date.now(),
-        };
-        setAiCompanionMessages((prev) => [...prev, aiMsg]);
-      } catch (err) {
-        console.error(err);
-      }
+    localStorage.setItem('anon_user', JSON.stringify(updated));
+    if (socket && isConnected) {
+      socket.emit('user:register', {
+        alias: updated.alias,
+        avatarSeed: updated.avatarSeed,
+      });
     }
   };
 
-  const handleLeaveSession = () => {
-    leaveSession();
-    webrtc.endCall();
-    setAiCompanionMessages([]);
+  // Rename alias
+  const handleUpdateAlias = (newAlias: string) => {
+    const updated: AnonymousUser = {
+      ...currentUser,
+      alias: newAlias,
+    };
+    setCurrentUser(updated);
+    localStorage.setItem('anon_user', JSON.stringify(updated));
+    if (socket && isConnected) {
+      socket.emit('user:register', {
+        alias: updated.alias,
+        avatarSeed: updated.avatarSeed,
+      });
+    }
   };
 
-  const isInSession = !!currentRoomId || activeMode === 'ai';
-  const displayMessages = activeMode === 'ai' ? aiCompanionMessages : socketMessages;
+  // Join or Start Meeting Room
+  const handleJoinMeeting = (roomCode: string) => {
+    const cleanCode = roomCode.trim().toLowerCase();
+    updateUrlWithRoom(cleanCode);
+    joinCustomRoom(cleanCode);
+  };
+
+  // Leave Active Call
+  const handleLeaveCall = () => {
+    leaveSession();
+    webrtc.endCall();
+    updateUrlWithRoom(null);
+    setInvitedRoomCode(null);
+  };
+
+  const isInCall = !!currentRoomId;
 
   return (
-    <div className="flex flex-col min-h-screen bg-[#080a0f] text-slate-100 overflow-hidden font-sans">
-      {/* Floating Reactions overlay */}
-      <div className="fixed inset-0 pointer-events-none z-50 flex items-center justify-center overflow-hidden">
-        {floatingReactions.map((r) => (
-          <div
-            key={r.id}
-            className="absolute bottom-24 text-4xl sm:text-5xl animate-out fade-out slide-out-to-top-32 duration-1000 select-none"
-            style={{
-              left: `${35 + Math.random() * 30}%`,
-              animationDuration: '2.5s',
-            }}
-          >
-            {r.emoji}
-          </div>
-        ))}
-      </div>
-
-      {/* Top Navigation Bar */}
+    <div className="min-h-screen bg-[#121418] text-[#f1f3f4] font-['Plus_Jakarta_Sans',sans-serif] flex flex-col">
+      {/* Top Navbar */}
       <Navbar
         currentUser={currentUser}
-        onlineUsers={onlineStats.onlineUsers}
-        audioLevel={webrtc.audioLevel}
-        isInSession={isInSession}
-        onRegenerateAlias={handleRegenerateAlias}
-        onOpenSoundboard={() => setIsSoundboardOpen(true)}
+        isInCall={isInCall}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onRegenerateUser={handleRegenerateUser}
+        onUpdateAlias={handleUpdateAlias}
       />
 
-      {/* Main Content Area */}
-      {!isInSession ? (
+      {/* Main View: Lobby / Green Room vs Active Video Call */}
+      {isInCall ? (
+        <CallView
+          currentUser={currentUser}
+          peerState={peerState}
+          localStream={webrtc.localStream}
+          remoteStream={webrtc.remoteStream}
+          isAudioEnabled={webrtc.isAudioEnabled}
+          isVideoEnabled={webrtc.isVideoEnabled}
+          isScreenSharing={webrtc.isScreenSharing}
+          audioLevel={webrtc.audioLevel}
+          roomCode={currentRoomCode || 'MEETING'}
+          messages={messages}
+          onToggleAudio={webrtc.toggleAudio}
+          onToggleVideo={webrtc.toggleVideo}
+          onToggleScreenShare={webrtc.toggleScreenShare}
+          onSendMessage={sendMessage}
+          onToggleHandRaise={toggleHandRaise}
+          onLeaveCall={handleLeaveCall}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+        />
+      ) : (
         <Lobby
           currentUser={currentUser}
-          isSearching={isSearching}
           localStream={webrtc.localStream}
           isAudioEnabled={webrtc.isAudioEnabled}
           isVideoEnabled={webrtc.isVideoEnabled}
-          activeVoiceFilter={webrtc.activeVoiceFilter}
-          activeVideoFilter={webrtc.activeVideoFilter}
           audioLevel={webrtc.audioLevel}
-          onStartSearch={handleStartStrangerMatch}
-          onCancelSearch={cancelStrangerSearch}
-          onJoinCustomRoom={handleJoinCustomRoom}
-          onStartAiChat={handleStartAiCompanion}
+          invitedRoomCode={invitedRoomCode}
+          onJoinRoom={handleJoinMeeting}
           onToggleAudio={webrtc.toggleAudio}
           onToggleVideo={webrtc.toggleVideo}
-          onChangeVoiceFilter={webrtc.changeVoiceFilter}
-          onChangeVideoFilter={webrtc.changeVideoFilter}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onRegenerateUser={handleRegenerateUser}
+          onUpdateAlias={handleUpdateAlias}
         />
-      ) : (
-        <div className="relative flex flex-col md:flex-row flex-1 h-[calc(100vh-65px)] overflow-hidden">
-          {/* Mobile View Switcher Tab bar */}
-          <div className="flex md:hidden items-center justify-around border-b border-slate-800 bg-slate-950 p-2 shrink-0">
-            <button
-              onClick={() => setMobileTab('video')}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold ${
-                mobileTab === 'video' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400'
-              }`}
-            >
-              <Video className="h-4 w-4" />
-              <span>Video & Call</span>
-            </button>
-            <button
-              onClick={() => setMobileTab('chat')}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-semibold ${
-                mobileTab === 'chat' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400'
-              }`}
-            >
-              <MessageSquare className="h-4 w-4" />
-              <span>Chat ({displayMessages.length})</span>
-            </button>
-          </div>
-
-          {/* Video / Call Stage Component */}
-          <div
-            className={`flex-1 h-full ${
-              mobileTab === 'video' ? 'flex' : 'hidden md:flex'
-            }`}
-          >
-            <CallView
-              currentUser={currentUser}
-              peerState={peerState}
-              mode={activeMode}
-              roomCode={currentRoomCode}
-              localStream={webrtc.localStream}
-              remoteStream={webrtc.remoteStream}
-              isAudioEnabled={webrtc.isAudioEnabled}
-              isVideoEnabled={webrtc.isVideoEnabled}
-              isScreenSharing={webrtc.isScreenSharing}
-              activeVoiceFilter={webrtc.activeVoiceFilter}
-              activeVideoFilter={webrtc.activeVideoFilter}
-              audioLevel={webrtc.audioLevel}
-              isWhiteboardOpen={isWhiteboardOpen}
-              onToggleAudio={webrtc.toggleAudio}
-              onToggleVideo={webrtc.toggleVideo}
-              onToggleScreenShare={webrtc.toggleScreenShare}
-              onChangeVoiceFilter={webrtc.changeVoiceFilter}
-              onChangeVideoFilter={webrtc.changeVideoFilter}
-              onToggleWhiteboard={() => setIsWhiteboardOpen(!isWhiteboardOpen)}
-              onOpenSoundboard={() => setIsSoundboardOpen(true)}
-              onNextStranger={skipStranger}
-              onEndCall={handleLeaveSession}
-            />
-          </div>
-
-          {/* Encrypted Anonymous Chat Panel */}
-          <div
-            className={`h-full ${
-              mobileTab === 'chat' ? 'flex flex-1' : 'hidden md:flex'
-            }`}
-          >
-            <ChatPanel
-              currentUser={currentUser}
-              messages={displayMessages}
-              isPeerTyping={isPeerTyping}
-              activeVoiceFilter={webrtc.activeVoiceFilter}
-              onSendMessage={
-                activeMode === 'ai' ? handleSendAiMessage : sendMessage
-              }
-              onSendTyping={sendTyping}
-              onSendReaction={sendReaction}
-            />
-          </div>
-        </div>
       )}
 
-      {/* Real-time Collaborative Whiteboard Modal */}
-      <WhiteboardModal
-        isOpen={isWhiteboardOpen}
-        strokes={whiteboardStrokes}
-        onEmitStroke={emitStroke}
-        onClearWhiteboard={emitClearWhiteboard}
-        onClose={() => setIsWhiteboardOpen(false)}
-      />
-
-      {/* Real-time Soundboard Modal */}
-      <SoundboardModal
-        isOpen={isSoundboardOpen}
-        onTriggerSound={(sound) => sendReaction(undefined, sound)}
-        onClose={() => setIsSoundboardOpen(false)}
-      />
-
-      {/* Settings Modal */}
+      {/* Audio & Video Device Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
-        currentUser={currentUser}
-        onUpdateUser={handleUpdateUser}
         onClose={() => setIsSettingsOpen(false)}
+        audioInputs={webrtc.audioInputs}
+        videoInputs={webrtc.videoInputs}
+        audioOutputs={webrtc.audioOutputs}
+        selectedAudioInput={webrtc.selectedAudioInput}
+        selectedVideoInput={webrtc.selectedVideoInput}
+        selectedAudioOutput={webrtc.selectedAudioOutput}
+        onSelectAudioInput={(deviceId) => {
+          webrtc.setSelectedAudioInput(deviceId);
+          webrtc.initLocalStream(webrtc.isVideoEnabled, webrtc.isAudioEnabled, deviceId, webrtc.selectedVideoInput);
+        }}
+        onSelectVideoInput={(deviceId) => {
+          webrtc.setSelectedVideoInput(deviceId);
+          webrtc.initLocalStream(webrtc.isVideoEnabled, webrtc.isAudioEnabled, webrtc.selectedAudioInput, deviceId);
+        }}
+        onSelectAudioOutput={webrtc.setSelectedAudioOutput}
+        audioLevel={webrtc.audioLevel}
       />
+
+      {/* Invite Share Modal */}
+      {currentRoomCode && (
+        <InviteModal
+          isOpen={isInviteModalOpen}
+          roomCode={currentRoomCode}
+          onClose={() => setIsInviteModalOpen(false)}
+        />
+      )}
     </div>
   );
-}
+};
+
+export default App;
