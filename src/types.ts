@@ -5,15 +5,32 @@ export interface AnonymousUser {
   color: string;
 }
 
+export type AttachmentType = 'image' | 'video' | 'audio' | 'document' | 'other';
+
+export interface ChatAttachment {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  fileType: AttachmentType;
+  mimeType: string;
+  url: string;
+  duration?: number;
+  expiresAt: number; // 30-day auto-expiry timestamp
+}
+
 export interface ChatMessage {
   id: string;
+  roomId?: string;
   senderId: string;
   senderAlias: string;
   senderAvatarSeed: string;
   text: string;
   timestamp: number;
+  expiresAt: number; // 30 days from creation
   isEncrypted?: boolean;
   isDirectP2P?: boolean;
+  attachments?: ChatAttachment[];
+  reactions?: Record<string, string[]>; // emoji -> array of user aliases
 }
 
 export interface PeerState {
@@ -42,3 +59,4 @@ export interface E2EESecurityDetails {
   isP2PDataChannelActive: boolean;
   dtlsSrtpActive: boolean;
 }
+

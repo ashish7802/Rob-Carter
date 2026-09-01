@@ -2,7 +2,9 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
+import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
@@ -11,7 +13,176 @@ const app = express();
 const httpServer = createServer(app);
 const PORT = 3000;
 
-app.use(express.json());
+// 30 Days in Milliseconds (1 Month Auto-Deletion Retention)
+const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Ensure persistent storage directories exist
+const DATA_DIR = path.join(process.cwd(), 'data');
+const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
+const CHAT_FILE = path.join(DATA_DIR, 'chat_history.json');
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+// Serve uploaded media & files statically with proper caching and disposition headers
+app.use('/uploads', express.static(UPLOADS_DIR, {
+  maxAge: '7d',
+  setHeaders: (res, filePath) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  }
+}));
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Attachment & Message Interfaces
+export type AttachmentType = 'image' | 'video' | 'audio' | 'document' | 'other';
+
+export interface ChatAttachment {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  fileType: AttachmentType;
+  mimeType: string;
+  url: string;
+  duration?: number;
+  expiresAt: number;
+}
+
+export interface StoredMessage {
+  id: string;
+  roomId: string;
+  roomCode: string;
+  senderId: string;
+  senderAlias: string;
+  senderAvatarSeed: string;
+  text: string;
+  timestamp: number;
+  expiresAt: number; // 30-day auto-expiry timestamp
+  isEncrypted?: boolean;
+  isDirectP2P?: boolean;
+  attachments?: ChatAttachment[];
+  reactions?: Record<string, string[]>;
+}
+
+// In-Memory & Persistent Chat Store
+let chatHistory: StoredMessage[] = [];
+
+function loadChatHistory() {
+  try {
+    if (fs.existsSync(CHAT_FILE)) {
+      const raw = fs.readFileSync(CHAT_FILE, 'utf-8');
+      chatHistory = JSON.parse(raw);
+      console.log(`[Storage]: Loaded ${chatHistory.length} messages from disk`);
+    }
+  } catch (err) {
+    console.error('[Storage Error]: Failed to load chat history:', err);
+    chatHistory = [];
+  }
+}
+
+function saveChatHistory() {
+  try {
+    fs.writeFileSync(CHAT_FILE, JSON.stringify(chatHistory, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[Storage Error]: Failed to save chat history:', err);
+  }
+}
+
+// Periodic 30-Day Auto-Purge of Expired Messages & Files
+function purgeExpiredMessagesAndFiles() {
+  const now = Date.now();
+  const initialCount = chatHistory.length;
+  const expiredMessages: StoredMessage[] = [];
+  const validMessages: StoredMessage[] = [];
+
+  for (const msg of chatHistory) {
+    if (msg.expiresAt && now > msg.expiresAt) {
+      expiredMessages.push(msg);
+    } else {
+      validMessages.push(msg);
+    }
+  }
+
+  // Delete attached files from disk for expired messages
+  for (const msg of expiredMessages) {
+    if (msg.attachments) {
+      for (const att of msg.attachments) {
+        try {
+          const filename = path.basename(att.url);
+          const fullPath = path.join(UPLOADS_DIR, filename);
+          if (fs.existsSync(fullPath)) {
+            fs.unlinkSync(fullPath);
+            console.log(`[Auto-Purge (30 Days)]: Deleted expired file ${filename}`);
+          }
+        } catch (e) {
+          console.warn('[Auto-Purge Warning]: Failed to delete file:', e);
+        }
+      }
+    }
+  }
+
+  if (expiredMessages.length > 0) {
+    chatHistory = validMessages;
+    saveChatHistory();
+    console.log(`[Auto-Purge (30 Days)]: Purged ${expiredMessages.length} expired messages out of ${initialCount}.`);
+  }
+}
+
+// Load history on boot and run purge every 30 minutes
+loadChatHistory();
+purgeExpiredMessagesAndFiles();
+setInterval(purgeExpiredMessagesAndFiles, 30 * 60 * 1000);
+
+// Multer Storage Configuration for File/Image/Video Uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, UPLOADS_DIR);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+    // Sanitize original file name
+    const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `${uniqueSuffix}-${sanitizedName}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB per file
+  },
+});
+
+// Helper to determine media file type
+function getAttachmentType(mime: string, originalName: string): AttachmentType {
+  const ext = path.extname(originalName).toLowerCase();
+  if (mime.startsWith('image/') || ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp'].includes(ext)) {
+    return 'image';
+  }
+  if (mime.startsWith('video/') || ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v'].includes(ext)) {
+    return 'video';
+  }
+  if (mime.startsWith('audio/') || ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'].includes(ext)) {
+    return 'audio';
+  }
+  if (
+    mime.includes('pdf') ||
+    mime.includes('word') ||
+    mime.includes('excel') ||
+    mime.includes('presentation') ||
+    mime.includes('text') ||
+    mime.includes('json') ||
+    ['.pdf', '.doc', '.docx', '.txt', '.zip', '.rar', '.tar', '.gz', '.xls', '.xlsx', '.csv', '.ppt', '.pptx', '.md', '.ts', '.tsx', '.js', '.py'].includes(ext)
+  ) {
+    return 'document';
+  }
+  return 'other';
+}
 
 // In-memory peer session state
 interface UserSession {
@@ -23,13 +194,11 @@ interface UserSession {
 }
 
 const users = new Map<string, UserSession>();
-// Map roomId -> Set of socket IDs
 const rooms = new Map<string, Set<string>>();
-
 const startTime = Date.now();
 
 // -------------------------------------------------------------
-// REST API ROUTES (Full Stack Backend Services)
+// REST API ROUTES
 // -------------------------------------------------------------
 
 // Health check endpoint
@@ -39,22 +208,75 @@ app.get('/api/health', (req, res) => {
     uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
     activeConnections: users.size,
     activeRooms: rooms.size,
+    totalStoredMessages: chatHistory.length,
+    retentionPolicy: '30 Days (1 Month Auto-Purge)',
     e2eeProtocol: 'AES-256-GCM + DTLS-SRTP v1.0',
     timestamp: new Date().toISOString(),
   });
 });
 
-// Real-time stats
-app.get('/api/stats', (req, res) => {
+// Chat Retention Info
+app.get('/api/chat/retention-info', (req, res) => {
   res.json({
-    totalActiveUsers: users.size,
-    totalActiveRooms: rooms.size,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    e2eeSupported: true,
+    retentionDays: 30,
+    retentionMs: RETENTION_MS,
+    autoPurgeActive: true,
+    policyDescription: 'All messages, images, videos, audio notes, and files are automatically deleted after 30 days (1 month).',
+    totalStoredMessages: chatHistory.length,
   });
 });
 
-// Generate fresh meeting room code (Google Meet style: 3-4-3 chars)
+// Room Chat History API
+app.get('/api/chat/history/:roomCode', (req, res) => {
+  const roomCode = (req.params.roomCode || '').trim().toUpperCase();
+  purgeExpiredMessagesAndFiles();
+
+  const roomMessages = chatHistory.filter((m) => m.roomCode === roomCode);
+  res.json({
+    roomCode,
+    retentionDays: 30,
+    count: roomMessages.length,
+    messages: roomMessages,
+  });
+});
+
+// File / Image / Video Upload API
+app.post('/api/chat/upload', upload.array('files', 10), (req, res) => {
+  try {
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'No files provided' });
+    }
+
+    const now = Date.now();
+    const expiresAt = now + RETENTION_MS; // 30-day expiry
+
+    const attachments: ChatAttachment[] = files.map((file) => {
+      const fileType = getAttachmentType(file.mimetype, file.originalname);
+      return {
+        id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        fileName: file.originalname,
+        fileSize: file.size,
+        fileType,
+        mimeType: file.mimetype,
+        url: `/uploads/${file.filename}`,
+        expiresAt,
+      };
+    });
+
+    res.json({
+      success: true,
+      expiresAt,
+      retentionDays: 30,
+      attachments,
+    });
+  } catch (err: any) {
+    console.error('File upload error:', err);
+    res.status(500).json({ error: 'Failed to process file upload' });
+  }
+});
+
+// Generate fresh meeting room code
 app.post('/api/rooms/generate', (req, res) => {
   const chars = 'abcdefghijklmnopqrstuvwxyz';
   const pick = (n: number) => Array.from({ length: n }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
@@ -73,16 +295,20 @@ app.get('/api/rooms/verify/:code', (req, res) => {
   const roomUsers = rooms.get(fullRoomId);
   const count = roomUsers ? roomUsers.size : 0;
 
+  // Check stored messages count for this room code
+  const messageCount = chatHistory.filter((m) => m.roomCode === roomCode).length;
+
   res.json({
     roomCode,
-    exists: count > 0,
+    exists: count > 0 || messageCount > 0,
     participantCount: count,
-    isAvailable: count < 50, // Capacity check
+    messageCount,
+    isAvailable: count < 50,
   });
 });
 
 // -------------------------------------------------------------
-// SOCKET.IO REAL-TIME SIGNALING & ENCRYPTED RELAY
+// SOCKET.IO REAL-TIME SIGNALING & ENCRYPTED RELAY & CHAT
 // -------------------------------------------------------------
 
 const io = new Server(httpServer, {
@@ -158,12 +384,18 @@ io.on('connection', (socket: Socket) => {
         };
       });
 
+    // Send active room chat history (with 30-day auto-expiry)
+    purgeExpiredMessagesAndFiles();
+    const roomMessages = chatHistory.filter((m) => m.roomCode === normalizedCode);
+
     // Notify joining client
     socket.emit('room:joined', {
       roomCode: normalizedCode,
       roomId: fullRoomId,
-      isInitiator: !isFirstUser, // Joiner initiates WebRTC offer to existing peer
+      isInitiator: !isFirstUser,
       peers: peersInRoom,
+      history: roomMessages,
+      retentionDays: 30,
     });
 
     // Notify other peers in this room
@@ -234,7 +466,7 @@ io.on('connection', (socket: Socket) => {
     }
   });
 
-  // Media state changes (Audio muted, Video paused, Screen share active)
+  // Media state changes
   socket.on('media:state_change', (data: { audio: boolean; video: boolean; screenShare: boolean }) => {
     const session = users.get(socket.id);
     if (session?.roomId) {
@@ -257,42 +489,127 @@ io.on('connection', (socket: Socket) => {
     }
   });
 
-  // E2EE Encrypted Chat Message Relay
+  // Chat Typing indicator
+  socket.on('chat:typing', (data: { isTyping: boolean }) => {
+    const session = users.get(socket.id);
+    if (session?.roomId) {
+      socket.to(session.roomId).emit('chat:typing', {
+        senderId: socket.id,
+        senderAlias: session.alias,
+        isTyping: data.isTyping,
+      });
+    }
+  });
+
+  // Chat Message with optional Attachments (Files, Images, Videos, Audio) & 30-Day Expiry
+  socket.on('chat:message', (data: {
+    id?: string;
+    text?: string;
+    attachments?: ChatAttachment[];
+    isEncrypted?: boolean;
+  }) => {
+    const session = users.get(socket.id);
+    if (!session?.roomId) return;
+
+    const normalizedRoomCode = session.roomId.replace(/^room_/, '');
+    const now = Date.now();
+    const expiresAt = now + RETENTION_MS; // 30 Days TTL
+
+    const messagePayload: StoredMessage = {
+      id: data.id || `msg_${now}_${Math.random().toString(36).substring(2, 7)}`,
+      roomId: session.roomId,
+      roomCode: normalizedRoomCode,
+      senderId: socket.id,
+      senderAlias: session.alias,
+      senderAvatarSeed: session.avatarSeed,
+      text: (data.text || '').trim(),
+      timestamp: now,
+      expiresAt,
+      isEncrypted: !!data.isEncrypted,
+      attachments: data.attachments || [],
+      reactions: {},
+    };
+
+    // Save to persistent storage with 30-day TTL
+    chatHistory.push(messagePayload);
+    saveChatHistory();
+
+    // Broadcast in real-time to everyone in the room
+    io.to(session.roomId).emit('chat:message', messagePayload);
+  });
+
+  // E2EE Encrypted Chat Message Relay & Store
   socket.on('chat:encrypted_message', (data: {
     id?: string;
     encryptedPayload: { iv: string; ciphertext: string };
+    attachments?: ChatAttachment[];
   }) => {
     const session = users.get(socket.id);
     if (!session?.roomId || !data.encryptedPayload) return;
 
+    const normalizedRoomCode = session.roomId.replace(/^room_/, '');
+    const now = Date.now();
+    const expiresAt = now + RETENTION_MS;
+
     const messageEnvelope = {
-      id: data.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: data.id || `msg_${now}_${Math.random().toString(36).substring(2, 7)}`,
+      roomId: session.roomId,
+      roomCode: normalizedRoomCode,
       senderId: socket.id,
       senderAlias: session.alias,
       senderAvatarSeed: session.avatarSeed,
       encryptedPayload: data.encryptedPayload,
-      timestamp: Date.now(),
+      attachments: data.attachments || [],
+      timestamp: now,
+      expiresAt,
       isEncrypted: true,
+      reactions: {},
     };
+
+    // Store encrypted ciphertext for 30-day room history
+    chatHistory.push({
+      id: messageEnvelope.id,
+      roomId: session.roomId,
+      roomCode: normalizedRoomCode,
+      senderId: socket.id,
+      senderAlias: session.alias,
+      senderAvatarSeed: session.avatarSeed,
+      text: JSON.stringify(data.encryptedPayload),
+      timestamp: now,
+      expiresAt,
+      isEncrypted: true,
+      attachments: data.attachments || [],
+      reactions: {},
+    });
+    saveChatHistory();
 
     io.to(session.roomId).emit('chat:encrypted_message', messageEnvelope);
   });
 
-  // Fallback plain chat message
-  socket.on('chat:message', (data: { id?: string; text: string }) => {
+  // Emoji Reaction on Message
+  socket.on('chat:reaction', (data: { messageId: string; emoji: string }) => {
     const session = users.get(socket.id);
-    if (!session?.roomId || !data.text?.trim()) return;
+    if (!session?.roomId || !data.messageId || !data.emoji) return;
 
-    const messagePayload = {
-      id: data.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      senderId: socket.id,
-      senderAlias: session.alias,
-      senderAvatarSeed: session.avatarSeed,
-      text: data.text.trim(),
-      timestamp: Date.now(),
-    };
+    const targetMsg = chatHistory.find((m) => m.id === data.messageId);
+    if (targetMsg) {
+      if (!targetMsg.reactions) targetMsg.reactions = {};
+      const list = targetMsg.reactions[data.emoji] || [];
+      const userIndex = list.indexOf(session.alias);
+      if (userIndex >= 0) {
+        list.splice(userIndex, 1);
+        if (list.length === 0) delete targetMsg.reactions[data.emoji];
+      } else {
+        list.push(session.alias);
+        targetMsg.reactions[data.emoji] = list;
+      }
+      saveChatHistory();
 
-    io.to(session.roomId).emit('chat:message', messagePayload);
+      io.to(session.roomId).emit('chat:reaction_updated', {
+        messageId: data.messageId,
+        reactions: targetMsg.reactions,
+      });
+    }
   });
 
   // Call End / Leave Room
@@ -343,6 +660,7 @@ async function start() {
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`AnonMeet Full-Stack Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[Chat Retention]: 30-Day auto-purge enabled.`);
   });
 }
 

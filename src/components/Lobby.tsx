@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AnonymousUser } from '../types';
 import { generateMeetCode, getRoomInviteUrl, copyToClipboard } from '../utils/invite';
+import { RoomChatModal } from './RoomChatModal';
 import {
   Video,
   VideoOff,
@@ -19,6 +20,8 @@ import {
   Sparkles,
   Info,
   RefreshCw,
+  MessageSquare,
+  Clock,
 } from 'lucide-react';
 
 interface LobbyProps {
@@ -56,6 +59,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [copiedLaterLink, setCopiedLaterLink] = useState(false);
   const [isEditingAlias, setIsEditingAlias] = useState(false);
   const [aliasInput, setAliasInput] = useState(currentUser.alias);
+  const [isRoomChatOpen, setIsRoomChatOpen] = useState(false);
 
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -223,6 +227,32 @@ export const Lobby: React.FC<LobbyProps> = ({
                   Join
                 </button>
               </form>
+            </div>
+
+            {/* Room Chat & File Sharing Quick Button */}
+            <div className="flex items-center justify-between p-3 rounded-2xl bg-[#1e2229] border border-[#2d3139]">
+              <div className="flex items-center gap-2.5">
+                <div className="h-8 w-8 rounded-xl bg-cyan-950/80 text-cyan-400 border border-cyan-500/30 flex items-center justify-center">
+                  <MessageSquare className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                    <span>Room Chat & File Hub</span>
+                    <span className="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded border border-amber-500/30">
+                      30-Day Purge
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-[#9aa0a6]">
+                    Share photos, videos, voice notes & files with room history
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsRoomChatOpen(true)}
+                className="px-3.5 py-1.5 rounded-xl bg-[#282d36] hover:bg-cyan-600 hover:text-white text-cyan-300 text-xs font-medium transition-colors cursor-pointer"
+              >
+                Open Chat
+              </button>
             </div>
 
             {/* Created Later Link Banner */}
@@ -425,6 +455,17 @@ export const Lobby: React.FC<LobbyProps> = ({
         </div>
 
       </div>
+
+      {/* Room Chat & File Hub Modal */}
+      <RoomChatModal
+        isOpen={isRoomChatOpen}
+        onClose={() => setIsRoomChatOpen(false)}
+        currentUser={currentUser}
+        onJoinVideoCall={(code) => {
+          setIsRoomChatOpen(false);
+          onJoinRoom(code);
+        }}
+      />
     </main>
   );
 };

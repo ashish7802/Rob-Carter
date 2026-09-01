@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AnonymousUser, PeerState, ChatMessage, E2EESecurityDetails } from '../types';
+import { AnonymousUser, PeerState, ChatMessage, ChatAttachment, E2EESecurityDetails } from '../types';
 import { getRoomInviteUrl, copyToClipboard } from '../utils/invite';
 import { ChatPanel } from './ChatPanel';
 import { E2EEVerificationModal } from './E2EEVerificationModal';
@@ -36,10 +36,13 @@ interface CallViewProps {
   roomCode: string;
   messages: ChatMessage[];
   e2eeDetails: E2EESecurityDetails | null;
+  typingPeers?: string[];
   onToggleAudio: () => void;
   onToggleVideo: () => void;
   onToggleScreenShare: () => void;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, attachments?: ChatAttachment[]) => void;
+  onTyping?: (isTyping: boolean) => void;
+  onReaction?: (messageId: string, emoji: string) => void;
   onToggleHandRaise: (isHandRaised: boolean) => void;
   onLeaveCall: () => void;
   onOpenSettings: () => void;
@@ -58,10 +61,13 @@ export const CallView: React.FC<CallViewProps> = ({
   roomCode,
   messages,
   e2eeDetails,
+  typingPeers = [],
   onToggleAudio,
   onToggleVideo,
   onToggleScreenShare,
   onSendMessage,
+  onTyping,
+  onReaction,
   onToggleHandRaise,
   onLeaveCall,
   onOpenSettings,
@@ -380,6 +386,10 @@ export const CallView: React.FC<CallViewProps> = ({
           messages={messages}
           currentUser={currentUser}
           onSendMessage={onSendMessage}
+          typingPeers={typingPeers}
+          onTyping={onTyping}
+          onReaction={onReaction}
+          roomCode={roomCode}
         />
 
         {/* 2. People / Participants Drawer */}

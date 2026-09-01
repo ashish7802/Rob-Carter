@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { AnonymousUser, ChatMessage, PeerState, E2EESecurityDetails } from '../types';
+import { AnonymousUser, ChatMessage, ChatAttachment, PeerState, E2EESecurityDetails } from '../types';
 import {
   deriveRoomKey,
   encryptText,
@@ -24,6 +24,7 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isInitiator, setIsInitiator] = useState(false);
   const [e2eeDetails, setE2eeDetails] = useState<E2EESecurityDetails | null>(null);
+  const [typingPeers, setTypingPeers] = useState<string[]>([]);
 
   const socketRef = useRef<Socket | null>(null);
   const roomIdRef = useRef<string | null>(null);
@@ -62,14 +63,17 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
       roomId: string;
       isInitiator: boolean;
       peers: { id: string; alias: string; avatarSeed: string }[];
+      history?: any[];
+      retentionDays?: number;
     }) => {
       setCurrentRoomId(data.roomId);
       setCurrentRoomCode(data.roomCode);
       setIsInitiator(data.isInitiator);
 
       // Derive AES-GCM-256 E2EE Room Key
+      let key: CryptoKey | null = null;
       try {
-        const key = await deriveRoomKey(data.roomCode);
+        key = await deriveRoomKey(data.roomCode);
         roomKeyRef.current = key;
 
         const security = await generateSecurityVerification(data.roomCode);
@@ -84,6 +88,40 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
         });
       } catch (err) {
         console.warn('Failed to derive E2EE key:', err);
+      }
+
+      // Process Room Chat History (with 30-day retention)
+      if (data.history && Array.isArray(data.history)) {
+        const decryptedHistory: ChatMessage[] = [];
+        for (const item of data.history) {
+          let text = item.text || '';
+          if (item.isEncrypted && key) {
+            try {
+              const payload = typeof item.text === 'string' ? JSON.parse(item.text) : item.text;
+              if (payload && payload.ciphertext && payload.iv) {
+                text = await decryptText(payload, key);
+              }
+            } catch (e) {
+              // Leave fallback or raw text
+            }
+          }
+          decryptedHistory.push({
+            id: item.id,
+            roomId: item.roomId,
+            senderId: item.senderId,
+            senderAlias: item.senderAlias,
+            senderAvatarSeed: item.senderAvatarSeed,
+            text,
+            timestamp: item.timestamp,
+            expiresAt: item.expiresAt || (item.timestamp + 30 * 24 * 60 * 60 * 1000),
+            isEncrypted: item.isEncrypted,
+            attachments: item.attachments || [],
+            reactions: item.reactions || {},
+          });
+        }
+        setMessages(decryptedHistory);
+      } else {
+        setMessages([]);
       }
 
       if (data.peers.length > 0) {
@@ -150,6 +188,17 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
       }
     });
 
+    // Typing state update
+    newSocket.on('chat:typing', (data: { senderId: string; senderAlias: string; isTyping: boolean }) => {
+      setTypingPeers((prev) => {
+        if (data.isTyping) {
+          return prev.includes(data.senderAlias) ? prev : [...prev, data.senderAlias];
+        } else {
+          return prev.filter((alias) => alias !== data.senderAlias);
+        }
+      });
+    });
+
     // Encrypted Chat message received
     newSocket.on('chat:encrypted_message', async (envelope: {
       id: string;
@@ -157,7 +206,10 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
       senderAlias: string;
       senderAvatarSeed: string;
       encryptedPayload: EncryptedPayload;
+      attachments?: ChatAttachment[];
       timestamp: number;
+      expiresAt?: number;
+      reactions?: Record<string, string[]>;
     }) => {
       let plaintext = '[Encrypted Message]';
       if (roomKeyRef.current && envelope.encryptedPayload) {
@@ -169,23 +221,40 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
         }
       }
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: envelope.id,
-          senderId: envelope.senderId,
-          senderAlias: envelope.senderAlias,
-          senderAvatarSeed: envelope.senderAvatarSeed,
-          text: plaintext,
-          timestamp: envelope.timestamp,
-          isEncrypted: true,
-        },
-      ]);
+      setMessages((prev) => {
+        // Prevent duplicates
+        if (prev.some((m) => m.id === envelope.id)) return prev;
+        return [
+          ...prev,
+          {
+            id: envelope.id,
+            senderId: envelope.senderId,
+            senderAlias: envelope.senderAlias,
+            senderAvatarSeed: envelope.senderAvatarSeed,
+            text: plaintext,
+            timestamp: envelope.timestamp,
+            expiresAt: envelope.expiresAt || (envelope.timestamp + 30 * 24 * 60 * 60 * 1000),
+            isEncrypted: true,
+            attachments: envelope.attachments || [],
+            reactions: envelope.reactions || {},
+          },
+        ];
+      });
     });
 
-    // Fallback unencrypted message
+    // Fallback or persistent plain message received
     newSocket.on('chat:message', (message: ChatMessage) => {
-      setMessages((prev) => [...prev, message]);
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === message.id)) return prev;
+        return [...prev, message];
+      });
+    });
+
+    // Reaction update
+    newSocket.on('chat:reaction_updated', (data: { messageId: string; reactions: Record<string, string[]> }) => {
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === data.messageId ? { ...msg, reactions: data.reactions } : msg))
+      );
     });
 
     return () => {
@@ -196,27 +265,47 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
   // Join Room
   const joinCustomRoom = useCallback((roomCode: string) => {
     if (socketRef.current) {
-      setMessages([]);
       socketRef.current.emit('room:join', { roomCode });
     }
   }, []);
 
-  // Send In-Call Message with Client-Side E2EE
-  const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim()) return;
+  // Send In-Call / Persistent Message with optional Attachments & Client-Side E2EE
+  const sendMessage = useCallback(async (text: string, attachments: ChatAttachment[] = []) => {
+    if (!text.trim() && attachments.length === 0) return;
 
-    if (socketRef.current && roomKeyRef.current) {
+    if (socketRef.current && roomKeyRef.current && text.trim()) {
       try {
         const encrypted = await encryptText(text.trim(), roomKeyRef.current);
         socketRef.current.emit('chat:encrypted_message', {
           encryptedPayload: encrypted,
+          attachments,
         });
       } catch (err) {
-        console.warn('E2EE encrypt error, falling back to plain relay:', err);
-        socketRef.current.emit('chat:message', { text: text.trim() });
+        console.warn('E2EE encrypt error, falling back to standard socket:', err);
+        socketRef.current.emit('chat:message', {
+          text: text.trim(),
+          attachments,
+        });
       }
     } else if (socketRef.current) {
-      socketRef.current.emit('chat:message', { text: text.trim() });
+      socketRef.current.emit('chat:message', {
+        text: text.trim(),
+        attachments,
+      });
+    }
+  }, []);
+
+  // Send Typing Indicator
+  const sendTyping = useCallback((isTyping: boolean) => {
+    if (socketRef.current) {
+      socketRef.current.emit('chat:typing', { isTyping });
+    }
+  }, []);
+
+  // Send Reaction
+  const sendReaction = useCallback((messageId: string, emoji: string) => {
+    if (socketRef.current) {
+      socketRef.current.emit('chat:reaction', { messageId, emoji });
     }
   }, []);
 
@@ -253,9 +342,12 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
     isInitiator,
     peerState,
     messages,
+    typingPeers,
     e2eeDetails,
     joinCustomRoom,
     sendMessage,
+    sendTyping,
+    sendReaction,
     handleP2PMessage,
     toggleHandRaise,
     leaveSession,

@@ -48,9 +48,12 @@ export const App: React.FC = () => {
     isInitiator,
     peerState,
     messages,
+    typingPeers,
     e2eeDetails,
     joinCustomRoom,
     sendMessage,
+    sendTyping,
+    sendReaction,
     handleP2PMessage,
     toggleHandRaise,
     leaveSession,
@@ -179,10 +182,13 @@ export const App: React.FC = () => {
           roomCode={currentRoomCode || 'MEETING'}
           messages={messages}
           e2eeDetails={e2eeDetails}
+          typingPeers={typingPeers}
           onToggleAudio={webrtc.toggleAudio}
           onToggleVideo={webrtc.toggleVideo}
           onToggleScreenShare={webrtc.toggleScreenShare}
           onSendMessage={sendMessage}
+          onTyping={sendTyping}
+          onReaction={sendReaction}
           onToggleHandRaise={toggleHandRaise}
           onLeaveCall={handleLeaveCall}
           onOpenSettings={() => setIsSettingsOpen(true)}
