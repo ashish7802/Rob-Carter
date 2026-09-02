@@ -53,6 +53,14 @@
         } catch (e) {
           console.warn('Fetch setter initialization:', e);
         }
+
+        // Catch non-critical unhandled errors from external/sandbox scripts
+        window.addEventListener('error', function(event) {
+          if (event && event.message && event.message.indexOf('fetch') !== -1 && event.message.indexOf('getter') !== -1) {
+            event.preventDefault();
+            return true;
+          }
+        });
       })();
     </script>
   </head>

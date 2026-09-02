@@ -98,6 +98,10 @@ export function useWebRTC({
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+
       const checkLevel = () => {
         if (analyserRef.current) {
           analyserRef.current.getByteFrequencyData(dataArray);

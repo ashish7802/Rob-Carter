@@ -29,6 +29,16 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
   const socketRef = useRef<Socket | null>(null);
   const roomIdRef = useRef<string | null>(null);
   const roomKeyRef = useRef<CryptoKey | null>(null);
+  const onMatchedRef = useRef(onMatched);
+  const onPeerDisconnectedRef = useRef(onPeerDisconnected);
+
+  useEffect(() => {
+    onMatchedRef.current = onMatched;
+  }, [onMatched]);
+
+  useEffect(() => {
+    onPeerDisconnectedRef.current = onPeerDisconnected;
+  }, [onPeerDisconnected]);
 
   useEffect(() => {
     roomIdRef.current = currentRoomId;
@@ -137,8 +147,8 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
           isE2EEVerified: true,
         };
         setPeerState(peer);
-        if (onMatched) {
-          onMatched(peer, data.roomId, data.isInitiator);
+        if (onMatchedRef.current) {
+          onMatchedRef.current(peer, data.roomId, data.isInitiator);
         }
       }
     });
@@ -157,8 +167,8 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
       };
       setPeerState(peer);
       const activeRoom = data.roomId || roomIdRef.current;
-      if (onMatched && activeRoom) {
-        onMatched(peer, activeRoom, false);
+      if (onMatchedRef.current && activeRoom) {
+        onMatchedRef.current(peer, activeRoom, false);
       }
     });
 
@@ -183,8 +193,8 @@ export function useSocket({ currentUser, onMatched, onPeerDisconnected }: UseSoc
     // Peer Disconnected / Left
     newSocket.on('peer:disconnected', () => {
       setPeerState(null);
-      if (onPeerDisconnected) {
-        onPeerDisconnected('Peer has left the meeting');
+      if (onPeerDisconnectedRef.current) {
+        onPeerDisconnectedRef.current('Peer has left the meeting');
       }
     });
 

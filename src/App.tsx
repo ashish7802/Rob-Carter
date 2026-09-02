@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AnonymousUser } from './types';
 import { generateRandomAlias } from './utils/alias';
 import { parseRoomFromUrl, updateUrlWithRoom } from './utils/invite';
@@ -34,6 +34,9 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
 
+  // WebRTC reference for safe cross-hook callbacks
+  const webrtcRef = useRef<any>(null);
+
   // WebRTC remote stream handler callback
   const handleRemoteStream = useCallback((stream: MediaStream) => {
     console.log('[WebRTC Remote Stream Ready]:', stream.id);
@@ -63,13 +66,13 @@ export const App: React.FC = () => {
       console.log('[Room Peer Connected]:', peer.alias, 'initiator:', initiator);
       if (initiator) {
         setTimeout(() => {
-          webrtc.startCall();
+          webrtcRef.current?.startCall();
         }, 400);
       }
     },
     onPeerDisconnected: (reason) => {
       console.log('[Peer Disconnected]:', reason);
-      webrtc.endCall();
+      webrtcRef.current?.endCall();
     },
   });
 
@@ -85,6 +88,10 @@ export const App: React.FC = () => {
       }
     },
   });
+
+  useEffect(() => {
+    webrtcRef.current = webrtc;
+  }, [webrtc]);
 
   // Listen to URL changes for room invites
   useEffect(() => {
