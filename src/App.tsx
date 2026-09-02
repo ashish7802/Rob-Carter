@@ -201,6 +201,7 @@ export const App: React.FC = () => {
           isVideoEnabled={webrtc.isVideoEnabled}
           audioLevel={webrtc.audioLevel}
           invitedRoomCode={invitedRoomCode}
+          cameraError={webrtc.cameraError}
           onJoinRoom={handleJoinMeeting}
           onToggleAudio={webrtc.toggleAudio}
           onToggleVideo={webrtc.toggleVideo}

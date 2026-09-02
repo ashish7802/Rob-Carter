@@ -99,6 +99,10 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
   // Audio recording
   const startAudioRecording = async () => {
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        console.warn('Microphone access is not supported in this browser.');
+        return;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -122,7 +126,8 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
       setRecordingSeconds(0);
       timerIntervalRef.current = setInterval(() => setRecordingSeconds((s) => s + 1), 1000);
     } catch (e) {
-      console.error(e);
+      console.warn('Microphone recording error:', e);
+      setIsRecordingAudio(false);
     }
   };
 
@@ -163,26 +168,58 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
       }
     }
 
-    const newMessage: ChatMessage = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      roomId: `room_${activeRoomCode}`,
-      senderId: currentUser.id,
-      senderAlias: currentUser.alias,
-      senderAvatarSeed: currentUser.avatarSeed,
-      text: inputText.trim(),
-      timestamp: Date.now(),
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
-      attachments: uploadedAttachments,
-    };
-
-    setMessages((prev) => [...prev, newMessage]);
+    const currentText = inputText.trim();
     setInputText('');
     setSelectedFiles([]);
 
-    // Trigger refresh
-    setTimeout(() => {
-      fetchRoomMessages(activeRoomCode);
-    }, 400);
+    try {
+      const res = await fetch('/api/chat/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomCode: activeRoomCode,
+          senderId: currentUser.id,
+          senderAlias: currentUser.alias,
+          senderAvatarSeed: currentUser.avatarSeed,
+          text: currentText,
+          attachments: uploadedAttachments,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.message) {
+          setMessages((prev) => [...prev, data.message]);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to post message to room:', err);
+    }
+
+    // Refresh history
+    fetchRoomMessages(activeRoomCode);
+  };
+
+  const handleReaction = async (messageId: string, emoji: string) => {
+    try {
+      const res = await fetch('/api/chat/reaction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messageId,
+          emoji,
+          userAlias: currentUser.alias,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? { ...m, reactions: data.reactions } : m))
+        );
+      }
+    } catch (err) {
+      console.error('Failed to add reaction:', err);
+    }
   };
 
   return (

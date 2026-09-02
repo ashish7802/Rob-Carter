@@ -44,18 +44,30 @@ function fallbackCopy(text: string): boolean {
 export function parseRoomFromUrl(): string | null {
   if (typeof window === 'undefined') return null;
 
-  // 1. Check query parameter '?room=...' or '?join=...'
+  // 1. Check query parameter '?room=...' or '?join=...' or '?code=...' or '?meet=...'
   const params = new URLSearchParams(window.location.search);
   const roomQuery = params.get('room') || params.get('join') || params.get('code') || params.get('meet');
   if (roomQuery && roomQuery.trim()) {
     return roomQuery.trim().toLowerCase();
   }
 
-  // 2. Check path '/room/abc-defg-hij' or '/abc-defg-hij'
-  const path = window.location.pathname;
-  const match = path.match(/^\/(?:room\/)?([a-zA-Z0-9_-]{3,24})/i);
-  if (match && match[1] && match[1].toLowerCase() !== 'index.html' && match[1].toLowerCase() !== 'api') {
-    return match[1].trim().toLowerCase();
+  // 2. Check path '/meet/abc-defg-hij', '/room/abc-defg-hij', or '/abc-defg-hij'
+  const cleanPath = window.location.pathname.replace(/^\/+|\/+$/g, '');
+  if (cleanPath) {
+    const parts = cleanPath.split('/');
+    const reservedWords = ['api', 'uploads', 'assets', 'index.html', 'favicon.ico', 'vite', 'src', 'node_modules'];
+
+    if ((parts[0] === 'room' || parts[0] === 'meet') && parts[1]) {
+      const code = parts[1].trim();
+      if (code && !reservedWords.includes(code.toLowerCase())) {
+        return code.toLowerCase();
+      }
+    } else if (parts.length === 1 && !reservedWords.includes(parts[0].toLowerCase())) {
+      // Direct code pattern e.g. xxx-yyyy-zzz or custom-room
+      if (/^[a-zA-Z0-9_-]{3,32}$/.test(parts[0])) {
+        return parts[0].trim().toLowerCase();
+      }
+    }
   }
 
   return null;
@@ -72,7 +84,7 @@ export function updateUrlWithRoom(roomCode: string | null) {
       url.searchParams.delete('join');
       url.searchParams.delete('code');
       url.searchParams.delete('meet');
-      if (url.pathname.startsWith('/room/')) {
+      if (url.pathname.startsWith('/room/') || url.pathname.startsWith('/meet/')) {
         url.pathname = '/';
       }
     }

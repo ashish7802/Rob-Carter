@@ -119,6 +119,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   // Voice Note Recording
   const startAudioRecording = async () => {
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        console.warn('Microphone access is not supported in this browser.');
+        return;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -147,7 +151,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         setRecordingSeconds((prev) => prev + 1);
       }, 1000);
     } catch (err) {
-      console.error('Failed to access microphone for recording:', err);
+      console.warn('Failed to access microphone for recording:', err);
+      setIsRecordingAudio(false);
     }
   };
 

@@ -240,6 +240,90 @@ app.get('/api/chat/history/:roomCode', (req, res) => {
   });
 });
 
+// REST endpoint to post a message into room chat (used by RoomChatModal & external clients)
+app.post('/api/chat/message', (req, res) => {
+  try {
+    const { roomCode, text, senderId, senderAlias, senderAvatarSeed, attachments, isEncrypted } = req.body;
+    if (!roomCode || (!text && (!attachments || attachments.length === 0))) {
+      return res.status(400).json({ error: 'Missing roomCode or message content' });
+    }
+
+    const normalizedCode = (roomCode || '').trim().toUpperCase();
+    const fullRoomId = `room_${normalizedCode}`;
+    const now = Date.now();
+    const expiresAt = now + RETENTION_MS;
+
+    const messagePayload: StoredMessage = {
+      id: `msg_${now}_${Math.random().toString(36).substring(2, 7)}`,
+      roomId: fullRoomId,
+      roomCode: normalizedCode,
+      senderId: senderId || 'anonymous_rest',
+      senderAlias: senderAlias || 'Anonymous User',
+      senderAvatarSeed: senderAvatarSeed || 'seed',
+      text: (text || '').trim(),
+      timestamp: now,
+      expiresAt,
+      isEncrypted: !!isEncrypted,
+      attachments: attachments || [],
+      reactions: {},
+    };
+
+    chatHistory.push(messagePayload);
+    saveChatHistory();
+
+    // Broadcast in real-time to active room socket connections
+    io.to(fullRoomId).emit('chat:message', messagePayload);
+
+    res.json({
+      success: true,
+      message: messagePayload,
+    });
+  } catch (err: any) {
+    console.error('Failed to store chat message:', err);
+    res.status(500).json({ error: 'Internal server error storing message' });
+  }
+});
+
+// REST endpoint to add emoji reaction
+app.post('/api/chat/reaction', (req, res) => {
+  try {
+    const { messageId, emoji, userAlias } = req.body;
+    if (!messageId || !emoji) {
+      return res.status(400).json({ error: 'Missing messageId or emoji' });
+    }
+
+    const targetMsg = chatHistory.find((m) => m.id === messageId);
+    if (!targetMsg) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    if (!targetMsg.reactions) targetMsg.reactions = {};
+    const alias = userAlias || 'Anonymous';
+    const list = targetMsg.reactions[emoji] || [];
+    const userIndex = list.indexOf(alias);
+
+    if (userIndex >= 0) {
+      list.splice(userIndex, 1);
+      if (list.length === 0) delete targetMsg.reactions[emoji];
+    } else {
+      list.push(alias);
+      targetMsg.reactions[emoji] = list;
+    }
+
+    saveChatHistory();
+
+    io.to(targetMsg.roomId).emit('chat:reaction_updated', {
+      messageId,
+      reactions: targetMsg.reactions,
+    });
+
+    res.json({ success: true, reactions: targetMsg.reactions });
+  } catch (err: any) {
+    console.error('Reaction API error:', err);
+    res.status(500).json({ error: 'Failed to update reaction' });
+  }
+});
+
 // File / Image / Video Upload API
 app.post('/api/chat/upload', upload.array('files', 10), (req, res) => {
   try {

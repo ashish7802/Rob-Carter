@@ -82,6 +82,7 @@ export const CallView: React.FC<CallViewProps> = ({
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
 
   const inviteUrl = getRoomInviteUrl(roomCode);
 
@@ -106,12 +107,18 @@ export const CallView: React.FC<CallViewProps> = ({
     }
   }, [localStream, isVideoEnabled, isScreenSharing]);
 
-  // Attach remote stream
+  // Attach remote stream to both video tile and persistent audio element
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
     }
-  }, [remoteStream, peerState?.videoEnabled, peerState?.screenShareEnabled]);
+    if (remoteAudioRef.current && remoteStream) {
+      remoteAudioRef.current.srcObject = remoteStream;
+      remoteAudioRef.current.play().catch((e) => {
+        // User gesture or autoplay handled
+      });
+    }
+  }, [remoteStream, peerState?.videoEnabled, peerState?.screenShareEnabled, pinnedTile]);
 
   const handleCopyLink = async () => {
     const success = await copyToClipboard(inviteUrl);
@@ -667,6 +674,9 @@ export const CallView: React.FC<CallViewProps> = ({
         </div>
 
       </footer>
+
+      {/* Persistent Remote Audio Element to prevent sound dropping when video is toggled */}
+      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
 
       {/* E2EE Security Verification Dialog */}
       <E2EEVerificationModal

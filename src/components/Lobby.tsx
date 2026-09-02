@@ -31,6 +31,7 @@ interface LobbyProps {
   isVideoEnabled: boolean;
   audioLevel: number;
   invitedRoomCode?: string | null;
+  cameraError?: string | null;
   onJoinRoom: (roomCode: string) => void;
   onToggleAudio: () => void;
   onToggleVideo: () => void;
@@ -46,6 +47,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   isVideoEnabled,
   audioLevel,
   invitedRoomCode,
+  cameraError,
   onJoinRoom,
   onToggleAudio,
   onToggleVideo,
@@ -113,11 +115,30 @@ export const Lobby: React.FC<LobbyProps> = ({
     let cleanCode = meetingInput.trim();
     if (cleanCode.includes('?room=')) {
       cleanCode = cleanCode.split('?room=')[1].split('&')[0];
+    } else if (cleanCode.includes('?code=')) {
+      cleanCode = cleanCode.split('?code=')[1].split('&')[0];
+    } else if (cleanCode.includes('?join=')) {
+      cleanCode = cleanCode.split('?join=')[1].split('&')[0];
+    } else if (cleanCode.includes('?meet=')) {
+      cleanCode = cleanCode.split('?meet=')[1].split('&')[0];
+    } else if (cleanCode.includes('/meet/')) {
+      cleanCode = cleanCode.split('/meet/')[1].split('?')[0];
     } else if (cleanCode.includes('/room/')) {
       cleanCode = cleanCode.split('/room/')[1].split('?')[0];
     } else if (cleanCode.startsWith('http')) {
-      const parts = cleanCode.split('/');
-      cleanCode = parts[parts.length - 1];
+      try {
+        const url = new URL(cleanCode);
+        const q = url.searchParams.get('room') || url.searchParams.get('code') || url.searchParams.get('join') || url.searchParams.get('meet');
+        if (q) {
+          cleanCode = q;
+        } else {
+          const parts = url.pathname.replace(/^\/+|\/+$/g, '').split('/');
+          cleanCode = parts[parts.length - 1];
+        }
+      } catch (err) {
+        const parts = cleanCode.split('/');
+        cleanCode = parts[parts.length - 1];
+      }
     }
 
     onJoinRoom(cleanCode);
@@ -397,6 +418,17 @@ export const Lobby: React.FC<LobbyProps> = ({
                 </button>
               </div>
             </div>
+
+            {/* Camera / Media status note if hardware is unavailable */}
+            {cameraError && (
+              <div className="flex items-start gap-2.5 p-3 rounded-2xl bg-amber-950/30 border border-amber-500/30 text-amber-200 text-xs">
+                <Info className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-amber-300">Device Notice: </span>
+                  <span>{cameraError}</span>
+                </div>
+              </div>
+            )}
 
             {/* Joining Identity & Quick Join CTA */}
             <div className="flex items-center justify-between p-3.5 rounded-2xl border border-[#2d3139] bg-[#1e2229]">

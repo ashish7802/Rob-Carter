@@ -116,7 +116,47 @@ export function useWebRTC({
     }
   }, []);
 
-  // Initialize Local Media Stream
+// Helper to create a fallback silent audio stream so WebRTC connection doesn't break
+function createSilentAudioStream(): MediaStream {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioCtx) {
+      const ctx = new AudioCtx();
+      const oscillator = ctx.createOscillator();
+      const dst = ctx.createMediaStreamDestination();
+      const gainNode = ctx.createGain();
+      gainNode.gain.setValueAtTime(0, ctx.currentTime);
+      oscillator.connect(gainNode);
+      gainNode.connect(dst);
+      oscillator.start();
+      const track = dst.stream.getAudioTracks()[0];
+      if (track) {
+        track.enabled = false;
+        return new MediaStream([track]);
+      }
+    }
+  } catch (e) {
+    console.warn('Fallback silent track creation error:', e);
+  }
+  return new MediaStream();
+}
+
+// Build flexible constraints that avoid OverconstrainedError
+function getFlexibleVideoConstraints(deviceId?: string): MediaTrackConstraints | boolean {
+  if (!deviceId) {
+    return { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } };
+  }
+  return { deviceId: { ideal: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } };
+}
+
+function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints | boolean {
+  if (!deviceId) {
+    return { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  }
+  return { deviceId: { ideal: deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+}
+
+// Initialize Local Media Stream
   const initLocalStream = useCallback(
     async (videoDesired = true, audioDesired = true, audioDeviceId?: string, videoDeviceId?: string) => {
       try {
@@ -127,33 +167,98 @@ export function useWebRTC({
           localStreamRef.current.getTracks().forEach((t) => t.stop());
         }
 
-        const constraints: MediaStreamConstraints = {
-          video: videoDesired
-            ? {
-                deviceId: videoDeviceId ? { exact: videoDeviceId } : undefined,
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-                facingMode: 'user',
-              }
-            : false,
-          audio: audioDesired
-            ? {
-                deviceId: audioDeviceId ? { exact: audioDeviceId } : undefined,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-              }
-            : false,
-        };
-
-        let stream: MediaStream;
-        try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-        } catch (err: any) {
-          console.warn('Could not acquire full stream, attempting audio fallback...', err);
-          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+          console.warn('getUserMedia is not supported in this environment');
+          const fallback = createSilentAudioStream();
+          localStreamRef.current = fallback;
+          setLocalStream(fallback);
           setIsVideoEnabled(false);
+          setIsAudioEnabled(false);
+          setCameraError('Media devices not supported in this browser environment.');
+          return fallback;
         }
+
+        let stream: MediaStream | null = null;
+        let hasVideo = false;
+        let hasAudio = false;
+
+        // 1. Try full requested stream if both are desired
+        if (videoDesired && audioDesired) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: getFlexibleVideoConstraints(videoDeviceId),
+              audio: getFlexibleAudioConstraints(audioDeviceId),
+            });
+            hasVideo = true;
+            hasAudio = true;
+          } catch (fullErr: any) {
+            console.warn('Combined media acquisition failed, attempting separate acquisition...', fullErr?.message || fullErr);
+            
+            // Try video and audio individually
+            let videoTrack: MediaStreamTrack | null = null;
+            let audioTrack: MediaStreamTrack | null = null;
+
+            try {
+              const vStream = await navigator.mediaDevices.getUserMedia({
+                video: getFlexibleVideoConstraints(videoDeviceId),
+              });
+              videoTrack = vStream.getVideoTracks()[0] || null;
+            } catch (vErr) {
+              console.warn('Video device not accessible:', vErr);
+            }
+
+            try {
+              const aStream = await navigator.mediaDevices.getUserMedia({
+                audio: getFlexibleAudioConstraints(audioDeviceId),
+              });
+              audioTrack = aStream.getAudioTracks()[0] || null;
+            } catch (aErr) {
+              console.warn('Audio device not accessible:', aErr);
+            }
+
+            if (videoTrack || audioTrack) {
+              stream = new MediaStream();
+              if (videoTrack) {
+                stream.addTrack(videoTrack);
+                hasVideo = true;
+              }
+              if (audioTrack) {
+                stream.addTrack(audioTrack);
+                hasAudio = true;
+              }
+            }
+          }
+        } else if (videoDesired && !audioDesired) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: getFlexibleVideoConstraints(videoDeviceId),
+            });
+            hasVideo = true;
+          } catch (vErr) {
+            console.warn('Video-only acquisition failed:', vErr);
+          }
+        } else if (!videoDesired && audioDesired) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: getFlexibleAudioConstraints(audioDeviceId),
+            });
+            hasAudio = true;
+          } catch (aErr) {
+            console.warn('Audio-only acquisition failed:', aErr);
+          }
+        }
+
+        // If no hardware tracks could be acquired, use silent fallback
+        if (!stream || stream.getTracks().length === 0) {
+          console.warn('No media devices could be acquired; activating safe fallback.');
+          stream = createSilentAudioStream();
+          hasVideo = false;
+          hasAudio = false;
+          setCameraError('No camera or microphone found. You can still join, listen, screen-share, and chat.');
+        }
+
+        setIsVideoEnabled(hasVideo);
+        setIsAudioEnabled(hasAudio);
 
         localStreamRef.current = stream;
         setLocalStream(stream);
@@ -176,29 +281,37 @@ export function useWebRTC({
           }
         }
 
-        // Analyze audio for speaking activity
-        startAudioAnalyzer(stream);
+        // Analyze audio for speaking activity if audio track present
+        if (hasAudio) {
+          startAudioAnalyzer(stream);
+        }
 
         // Re-enumerate devices to update labels
         enumerateDevices();
 
         return stream;
       } catch (err: any) {
-        console.error('Failed to get user media:', err);
-        setCameraError('Please allow camera & microphone permissions to join the call.');
-        return null;
+        console.warn('Gracefully handled media stream setup:', err?.message || err);
+        const fallback = createSilentAudioStream();
+        localStreamRef.current = fallback;
+        setLocalStream(fallback);
+        setIsVideoEnabled(false);
+        setIsAudioEnabled(false);
+        setCameraError('No camera or microphone found. You can still join, listen, screen-share, and chat.');
+        return fallback;
       }
     },
     [startAudioAnalyzer, enumerateDevices]
   );
 
   // Toggle Mic Audio
-  const toggleAudio = useCallback(() => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((t) => {
-        t.enabled = !isAudioEnabled;
-      });
+  const toggleAudio = useCallback(async () => {
+    const currentStream = localStreamRef.current;
+    const existingAudioTrack = currentStream?.getAudioTracks().find((t) => t.readyState === 'live');
+
+    if (existingAudioTrack) {
       const newState = !isAudioEnabled;
+      existingAudioTrack.enabled = newState;
       setIsAudioEnabled(newState);
       if (socket && roomId) {
         socket.emit('media:state_change', {
@@ -207,16 +320,47 @@ export function useWebRTC({
           screenShare: isScreenSharing,
         });
       }
+    } else if (!isAudioEnabled) {
+      // Try to acquire microphone dynamically
+      try {
+        if (navigator.mediaDevices?.getUserMedia) {
+          const aStream = await navigator.mediaDevices.getUserMedia({
+            audio: getFlexibleAudioConstraints(selectedAudioInput),
+          });
+          const newTrack = aStream.getAudioTracks()[0];
+          if (newTrack && currentStream) {
+            currentStream.addTrack(newTrack);
+            if (pcRef.current) {
+              const senders = pcRef.current.getSenders();
+              const aSender = senders.find((s) => s.track && s.track.kind === 'audio');
+              if (aSender) aSender.replaceTrack(newTrack);
+              else pcRef.current.addTrack(newTrack, currentStream);
+            }
+            startAudioAnalyzer(currentStream);
+            setIsAudioEnabled(true);
+            if (socket && roomId) {
+              socket.emit('media:state_change', {
+                audio: true,
+                video: isVideoEnabled,
+                screenShare: isScreenSharing,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Could not acquire microphone on toggle:', err);
+      }
     }
-  }, [isAudioEnabled, isVideoEnabled, isScreenSharing, socket, roomId]);
+  }, [isAudioEnabled, isVideoEnabled, isScreenSharing, selectedAudioInput, socket, roomId, startAudioAnalyzer]);
 
   // Toggle Camera Video
-  const toggleVideo = useCallback(() => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach((t) => {
-        t.enabled = !isVideoEnabled;
-      });
+  const toggleVideo = useCallback(async () => {
+    const currentStream = localStreamRef.current;
+    const existingVideoTrack = currentStream?.getVideoTracks().find((t) => t.readyState === 'live');
+
+    if (existingVideoTrack) {
       const newState = !isVideoEnabled;
+      existingVideoTrack.enabled = newState;
       setIsVideoEnabled(newState);
       if (socket && roomId) {
         socket.emit('media:state_change', {
@@ -225,8 +369,37 @@ export function useWebRTC({
           screenShare: isScreenSharing,
         });
       }
+    } else if (!isVideoEnabled) {
+      // Try to acquire camera dynamically
+      try {
+        if (navigator.mediaDevices?.getUserMedia) {
+          const vStream = await navigator.mediaDevices.getUserMedia({
+            video: getFlexibleVideoConstraints(selectedVideoInput),
+          });
+          const newTrack = vStream.getVideoTracks()[0];
+          if (newTrack && currentStream) {
+            currentStream.addTrack(newTrack);
+            if (pcRef.current) {
+              const senders = pcRef.current.getSenders();
+              const vSender = senders.find((s) => s.track && s.track.kind === 'video');
+              if (vSender) vSender.replaceTrack(newTrack);
+              else pcRef.current.addTrack(newTrack, currentStream);
+            }
+            setIsVideoEnabled(true);
+            if (socket && roomId) {
+              socket.emit('media:state_change', {
+                audio: isAudioEnabled,
+                video: true,
+                screenShare: isScreenSharing,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Could not acquire camera on toggle:', err);
+      }
     }
-  }, [isAudioEnabled, isVideoEnabled, isScreenSharing, socket, roomId]);
+  }, [isAudioEnabled, isVideoEnabled, isScreenSharing, selectedVideoInput, socket, roomId]);
 
   // Toggle Screen Sharing (Present now)
   const toggleScreenShare = useCallback(async () => {
