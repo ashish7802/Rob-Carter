@@ -50,14 +50,15 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<any>(null);
+  const cancelledRecordingRef = useRef<boolean>(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch room messages
-  const fetchRoomMessages = async (code: string) => {
+  const fetchRoomMessages = async (code: string, isBackground = false) => {
     if (!code.trim()) return;
-    setIsLoading(true);
+    if (!isBackground) setIsLoading(true);
     try {
       const res = await fetch(`/api/chat/history/${encodeURIComponent(code.trim().toUpperCase())}`);
       if (res.ok) {
@@ -68,9 +69,18 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
     } catch (err) {
       console.error('Failed to fetch chat history:', err);
     } finally {
-      setIsLoading(false);
+      if (!isBackground) setIsLoading(false);
     }
   };
+
+  // Auto-refresh chat messages every 4 seconds while modal is open
+  useEffect(() => {
+    if (!isOpen || !activeRoomCode) return;
+    const interval = setInterval(() => {
+      fetchRoomMessages(activeRoomCode, true);
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [isOpen, activeRoomCode]);
 
   useEffect(() => {
     if (activeRoomCode) {
@@ -103,6 +113,7 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
         console.warn('Microphone access is not supported in this browser.');
         return;
       }
+      cancelledRecordingRef.current = false;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -113,11 +124,13 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
       };
 
       mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const audioFile = new File([audioBlob], `voice-note-${Date.now()}.webm`, {
-          type: 'audio/webm',
-        });
-        setSelectedFiles((prev) => [...prev, audioFile]);
+        if (!cancelledRecordingRef.current && audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const audioFile = new File([audioBlob], `voice-note-${Date.now()}.webm`, {
+            type: 'audio/webm',
+          });
+          setSelectedFiles((prev) => [...prev, audioFile]);
+        }
         stream.getTracks().forEach((t) => t.stop());
       };
 
@@ -133,6 +146,17 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
 
   const stopAudioRecording = () => {
     if (mediaRecorderRef.current && isRecordingAudio) {
+      cancelledRecordingRef.current = false;
+      mediaRecorderRef.current.stop();
+      setIsRecordingAudio(false);
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    }
+  };
+
+  const cancelAudioRecording = () => {
+    if (mediaRecorderRef.current && isRecordingAudio) {
+      cancelledRecordingRef.current = true;
+      audioChunksRef.current = [];
       mediaRecorderRef.current.stop();
       setIsRecordingAudio(false);
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
@@ -348,6 +372,7 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
                                   <img
                                     src={att.url}
                                     alt={att.fileName}
+                                    referrerPolicy="no-referrer"
                                     className="w-full max-h-40 object-cover"
                                   />
                                 </div>
@@ -434,21 +459,50 @@ export const RoomChatModal: React.FC<RoomChatModalProps> = ({
                   </button>
                 )}
 
-                <input
-                  type="text"
-                  placeholder="Send a message or media to this room..."
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  className="flex-1 bg-transparent text-xs text-white placeholder-slate-400 focus:outline-none"
-                />
+                {isRecordingAudio ? (
+                  <div className="flex-1 flex items-center justify-between px-2 text-rose-400 font-mono text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
+                      <span>REC {Math.floor(recordingSeconds / 60)}:{(recordingSeconds % 60).toString().padStart(2, '0')}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={cancelAudioRecording}
+                        className="text-slate-400 hover:text-rose-400 text-xs px-2 py-1 rounded"
+                        title="Cancel recording"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={stopAudioRecording}
+                        className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-2.5 py-1 rounded-lg"
+                        title="Attach voice note"
+                      >
+                        <Square className="h-3 w-3 fill-current" /> Done
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      placeholder="Send a message or media to this room..."
+                      value={inputText}
+                      onChange={(e) => setInputText(e.target.value)}
+                      className="flex-1 bg-transparent text-xs text-white placeholder-slate-400 focus:outline-none"
+                    />
 
-                <button
-                  type="submit"
-                  disabled={!inputText.trim() && selectedFiles.length === 0}
-                  className="h-7 w-7 rounded-full bg-cyan-600 hover:bg-cyan-500 text-white flex items-center justify-center disabled:opacity-40"
-                >
-                  {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                </button>
+                    <button
+                      type="submit"
+                      disabled={!inputText.trim() && selectedFiles.length === 0}
+                      className="h-7 w-7 rounded-full bg-cyan-600 hover:bg-cyan-500 text-white flex items-center justify-center disabled:opacity-40"
+                    >
+                      {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    </button>
+                  </>
+                )}
               </div>
             </form>
           )}

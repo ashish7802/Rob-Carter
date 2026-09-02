@@ -335,10 +335,18 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
           if (newTrack && currentStream) {
             currentStream.addTrack(newTrack);
             if (pcRef.current) {
-              const senders = pcRef.current.getSenders();
-              const aSender = senders.find((s) => s.track && s.track.kind === 'audio');
-              if (aSender) aSender.replaceTrack(newTrack);
-              else pcRef.current.addTrack(newTrack, currentStream);
+              const pc = pcRef.current;
+              const aTransceiver = pc.getTransceivers?.().find(
+                (t) => t.receiver.track?.kind === 'audio' || t.sender.track?.kind === 'audio'
+              );
+              if (aTransceiver && aTransceiver.sender) {
+                await aTransceiver.sender.replaceTrack(newTrack);
+              } else {
+                const senders = pc.getSenders();
+                const aSender = senders.find((s) => s.track && s.track.kind === 'audio');
+                if (aSender) await aSender.replaceTrack(newTrack);
+                else pc.addTrack(newTrack, currentStream);
+              }
             }
             startAudioAnalyzer(currentStream);
             setIsAudioEnabled(true);
@@ -384,10 +392,18 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
           if (newTrack && currentStream) {
             currentStream.addTrack(newTrack);
             if (pcRef.current) {
-              const senders = pcRef.current.getSenders();
-              const vSender = senders.find((s) => s.track && s.track.kind === 'video');
-              if (vSender) vSender.replaceTrack(newTrack);
-              else pcRef.current.addTrack(newTrack, currentStream);
+              const pc = pcRef.current;
+              const vTransceiver = pc.getTransceivers?.().find(
+                (t) => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video'
+              );
+              if (vTransceiver && vTransceiver.sender) {
+                await vTransceiver.sender.replaceTrack(newTrack);
+              } else {
+                const senders = pc.getSenders();
+                const vSender = senders.find((s) => s.track && s.track.kind === 'video');
+                if (vSender) await vSender.replaceTrack(newTrack);
+                else pc.addTrack(newTrack, currentStream);
+              }
             }
             setIsVideoEnabled(true);
             if (socket && roomId) {
@@ -416,11 +432,19 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
       setIsScreenSharing(false);
 
       if (localStreamRef.current && pcRef.current) {
-        const videoTrack = localStreamRef.current.getVideoTracks()[0];
-        const senders = pcRef.current.getSenders();
-        const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
-        if (videoSender && videoTrack) {
-          videoSender.replaceTrack(videoTrack);
+        const pc = pcRef.current;
+        const videoTrack = localStreamRef.current.getVideoTracks()[0] || null;
+        const vTransceiver = pc.getTransceivers?.().find(
+          (t) => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video'
+        );
+        if (vTransceiver && vTransceiver.sender) {
+          await vTransceiver.sender.replaceTrack(videoTrack);
+        } else {
+          const senders = pc.getSenders();
+          const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+          if (videoSender) {
+            await videoSender.replaceTrack(videoTrack);
+          }
         }
       }
 
@@ -446,22 +470,38 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
 
         // Replace track in peer connection
         if (pcRef.current) {
-          const senders = pcRef.current.getSenders();
-          const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
-          if (videoSender && screenVideoTrack) {
-            videoSender.replaceTrack(screenVideoTrack);
+          const pc = pcRef.current;
+          const vTransceiver = pc.getTransceivers?.().find(
+            (t) => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video'
+          );
+          if (vTransceiver && vTransceiver.sender && screenVideoTrack) {
+            await vTransceiver.sender.replaceTrack(screenVideoTrack);
+          } else {
+            const senders = pc.getSenders();
+            const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+            if (videoSender && screenVideoTrack) {
+              await videoSender.replaceTrack(screenVideoTrack);
+            }
           }
         }
 
         // Handle user stopping screen share via browser's native floating bar
-        screenVideoTrack.onended = () => {
+        screenVideoTrack.onended = async () => {
           setIsScreenSharing(false);
           if (localStreamRef.current && pcRef.current) {
-            const cameraTrack = localStreamRef.current.getVideoTracks()[0];
-            const senders = pcRef.current.getSenders();
-            const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
-            if (videoSender && cameraTrack) {
-              videoSender.replaceTrack(cameraTrack);
+            const pc = pcRef.current;
+            const cameraTrack = localStreamRef.current.getVideoTracks()[0] || null;
+            const vTransceiver = pc.getTransceivers?.().find(
+              (t) => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video'
+            );
+            if (vTransceiver && vTransceiver.sender) {
+              await vTransceiver.sender.replaceTrack(cameraTrack);
+            } else {
+              const senders = pc.getSenders();
+              const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+              if (videoSender) {
+                await videoSender.replaceTrack(cameraTrack);
+              }
             }
           }
           if (socket && roomId) {
@@ -546,10 +586,31 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
 
     // Attach local stream tracks
     const currentStream = localStreamRef.current;
+    let hasAudio = false;
+    let hasVideo = false;
     if (currentStream) {
       currentStream.getTracks().forEach((track) => {
         pc.addTrack(track, currentStream);
+        if (track.kind === 'audio') hasAudio = true;
+        if (track.kind === 'video') hasVideo = true;
       });
+    }
+
+    // Reserve transceivers if audio or video track wasn't present at start
+    // This allows subsequent enable/unmute or screenshare to replace tracks without renegotiation
+    if (!hasAudio) {
+      try {
+        pc.addTransceiver('audio', { direction: 'sendrecv' });
+      } catch (e) {
+        console.warn('Audio transceiver reservation:', e);
+      }
+    }
+    if (!hasVideo) {
+      try {
+        pc.addTransceiver('video', { direction: 'sendrecv' });
+      } catch (e) {
+        console.warn('Video transceiver reservation:', e);
+      }
     }
 
     // Handle remote tracks
@@ -616,7 +677,7 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
         // Process buffered ICE candidates
         while (iceCandidatesQueue.current.length > 0) {
           const candidate = iceCandidatesQueue.current.shift();
-          if (candidate) {
+          if (candidate && (candidate.candidate || candidate.candidate === '')) {
             try {
               await pc.addIceCandidate(new RTCIceCandidate(candidate));
             } catch (e) {
@@ -648,7 +709,7 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
       // Process buffered ICE candidates
       while (iceCandidatesQueue.current.length > 0) {
         const candidate = iceCandidatesQueue.current.shift();
-        if (candidate) {
+        if (candidate && (candidate.candidate || candidate.candidate === '')) {
           try {
             await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
           } catch (e) {
@@ -663,12 +724,13 @@ function getFlexibleAudioConstraints(deviceId?: string): MediaTrackConstraints |
 
   // Handle incoming ICE Candidate
   const handleReceiveCandidate = useCallback(async (candidate: RTCIceCandidateInit) => {
+    if (!candidate || (!candidate.candidate && candidate.candidate !== '')) return;
     const pc = pcRef.current;
     if (pc && pc.remoteDescription && pc.remoteDescription.type) {
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (err) {
-        console.error('Error adding received ICE candidate:', err);
+        console.warn('Error adding received ICE candidate:', err);
       }
     } else {
       iceCandidatesQueue.current.push(candidate);

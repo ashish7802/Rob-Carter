@@ -199,6 +199,7 @@ export const CallView: React.FC<CallViewProps> = ({
                       ref={remoteVideoRef}
                       autoPlay
                       playsInline
+                      muted
                       className="h-full w-full object-cover"
                     />
                   ) : (
@@ -676,7 +677,7 @@ export const CallView: React.FC<CallViewProps> = ({
       </footer>
 
       {/* Persistent Remote Audio Element to prevent sound dropping when video is toggled */}
-      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+      <audio ref={remoteAudioRef} autoPlay playsInline className="opacity-0 pointer-events-none fixed -bottom-10 -right-10 w-1 h-1" />
 
       {/* E2EE Security Verification Dialog */}
       <E2EEVerificationModal

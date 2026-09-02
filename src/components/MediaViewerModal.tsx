@@ -103,6 +103,7 @@ export const MediaViewerModal: React.FC<MediaViewerModalProps> = ({ attachment, 
           <img
             src={attachment.url}
             alt={attachment.fileName}
+            referrerPolicy="no-referrer"
             className="max-h-[80vh] max-w-full object-contain rounded-lg shadow-2xl transition-transform duration-150"
             style={{
               transform: `scale(${zoom}) rotate(${rotation}deg)`,

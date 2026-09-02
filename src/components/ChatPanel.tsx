@@ -60,6 +60,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<any>(null);
+  const cancelledRecordingRef = useRef<boolean>(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -123,6 +124,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         console.warn('Microphone access is not supported in this browser.');
         return;
       }
+      cancelledRecordingRef.current = false;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -135,11 +137,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const audioFile = new File([audioBlob], `voice-note-${Date.now()}.webm`, {
-          type: 'audio/webm',
-        });
-        setSelectedFiles((prev) => [...prev, audioFile]);
+        if (!cancelledRecordingRef.current && audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const audioFile = new File([audioBlob], `voice-note-${Date.now()}.webm`, {
+            type: 'audio/webm',
+          });
+          setSelectedFiles((prev) => [...prev, audioFile]);
+        }
         stream.getTracks().forEach((track) => track.stop());
       };
 
@@ -158,6 +162,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
   const stopAudioRecording = () => {
     if (mediaRecorderRef.current && isRecordingAudio) {
+      cancelledRecordingRef.current = false;
       mediaRecorderRef.current.stop();
       setIsRecordingAudio(false);
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
@@ -166,9 +171,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
   const cancelAudioRecording = () => {
     if (mediaRecorderRef.current && isRecordingAudio) {
+      cancelledRecordingRef.current = true;
+      audioChunksRef.current = [];
       mediaRecorderRef.current.stop();
       setIsRecordingAudio(false);
-      audioChunksRef.current = [];
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     }
   };
@@ -348,6 +354,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                                 <img
                                   src={att.url}
                                   alt={att.fileName}
+                                  referrerPolicy="no-referrer"
                                   className="w-full max-h-48 object-cover rounded-lg hover:scale-105 transition-transform duration-200"
                                 />
                                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/media:opacity-100 transition-opacity flex items-center justify-center gap-2">

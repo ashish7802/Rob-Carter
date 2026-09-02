@@ -1,12 +1,1 @@
-{
-  "name": "AnonMeet - Anonymous E2EE Video Calls",
-  "description": "Clean, Google Meet-inspired anonymous video calls with end-to-end encryption, screen sharing, instant invite links, and zero accounts.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone",
-    "display-capture"
-  ],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}
+{"name":"CloakChat","description":"Clean, Google Meet-inspired anonymous video calls with end-to-end encryption, screen sharing, instant invite links, and zero accounts.","requestFramePermissions":["camera","microphone","display-capture"],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}
