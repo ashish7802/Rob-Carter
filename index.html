@@ -12,6 +12,49 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+      (function() {
+        try {
+          var origFetch = window.fetch;
+          if (typeof origFetch === 'function') {
+            var _activeFetch = function() {
+              return origFetch.apply(window, arguments);
+            };
+            try {
+              Object.defineProperty(window, 'fetch', {
+                get: function() {
+                  return _activeFetch;
+                },
+                set: function(fn) {
+                  if (typeof fn === 'function') {
+                    _activeFetch = fn;
+                  }
+                },
+                configurable: true,
+                enumerable: true
+              });
+            } catch (err1) {
+              try {
+                Object.defineProperty(Window.prototype, 'fetch', {
+                  get: function() {
+                    return _activeFetch;
+                  },
+                  set: function(fn) {
+                    if (typeof fn === 'function') {
+                      _activeFetch = fn;
+                    }
+                  },
+                  configurable: true,
+                  enumerable: true
+                });
+              } catch (err2) {}
+            }
+          }
+        } catch (e) {
+          console.warn('Fetch setter initialization:', e);
+        }
+      })();
+    </script>
   </head>
   <body class="bg-[#121418] text-[#f1f3f4] antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
     <div id="root"></div>
